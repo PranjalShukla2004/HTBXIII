@@ -10,36 +10,40 @@ program. Another agent will replay it on OTHER online shops with different layou
 wording and URLs, so nothing in it may depend on this particular site.
 
 Allowed ops:
-- navigate_to: reach a kind of page by any means (target describes the page, e.g. "shopping cart page")
+- navigate_to: reach a kind of page by any means (target describes the page)
 - search: type a value into the shop's product search box and submit it.
   One search step replaces fill + Enter + clicking the search button.
 - click: click an element described by its meaning
-- fill / select / check: set a form control (text box, dropdown, checkbox/radio)
+- fill / select / check: set a form control
 - press: press a key (rarely needed)
 - verify: an observable condition proving the previous steps worked
+- extract: record a piece of data from the current page. Every "extract" event means the
+  user COPIED that text because they want it saved. target = what the data is, by
+  meaning (e.g. "the product's current price", "link to the manufacturer's page");
+  output = a short snake_case column name (e.g. price, manufacturer_link). The copied
+  text itself must NOT appear in the program. Keep extract steps where they occurred.
 
 Rules:
 1. Targets describe MEANING, never this site's selectors, classes, ids, URLs or exact
-   button wording. Good: "product in the search results that best matches {{query}}".
-   Bad: "div.product-item", "the Smartphone link", "button labelled 'Add to cart'".
-2. Every value the user typed or chose becomes a variable in "variables", with the
-   recorded value as its default, referenced in steps as {{name}}. Use snake_case
-   names such as query, quantity, size, colour.
-3. Choose the product the user clicked by its relation to the variables (e.g. the
-   best match for {{query}}), not by its literal name. Only if nothing the user typed
-   identifies it, add a variable product_name holding its name.
+   button wording.
+2. Every value the user TYPED or CHOSE becomes an input variable in "variables", with the
+   recorded value as its default, referenced in steps as {{name}} (snake_case: query,
+   quantity, size, colour). Copied (extracted) values are outputs, not variables.
+3. Choose the product the user clicked by its relation to the variables (e.g. the best
+   match for {{query}}), not by its literal name.
 4. Mark optional=true for steps a similar shop may not have (quantity box, size or
-   colour picker, cookie banner).
-5. After an important state change add a verify step for its observable effect
-   (e.g. "basket count increases or a confirmation that the product was added").
-6. NEVER include checkout, login, registration, address or payment steps. The program
-   ends at or before viewing the basket/cart.
-7. "goal" is one sentence written in terms of the variables.
+   colour picker, cookie banner) and for extract steps whose data may be missing
+   (e.g. manufacturer link).
+5. After an important state change add a verify step for its observable effect.
+6. NEVER include checkout, login, registration, address or payment steps.
+7. "goal" is one sentence written in terms of the variables and outputs.
 
 Return ONLY JSON with this shape:
 {"goal": str,
  "variables": {"name": "default value", ...},
- "steps": [{"op": str, "target": str, "value": str or null, "optional": bool}, ...]}
+ "outputs": ["output_name", ...],
+ "steps": [{"op": str, "target": str, "value": str or null,
+            "output": str or null, "optional": bool}, ...]}
 """
 
 KEEP = ("tag", "type", "role", "label", "aria_label", "placeholder",
@@ -54,12 +58,14 @@ def compact(ev: TraceEvent) -> dict:
         return {"kind": "navigate", "path": u.path + (f"?{u.query}" if u.query else "")}
     d = {"kind": ev.kind, "page_title": ev.title,
          "element": {k: v for k, v in ev.el.items() if k in KEEP}}
-    if ev.value is not None:
+    if ev.kind == "extract":
+        d["element"]["is_link"] = bool(ev.el.get("href"))
+        d["copied_text"] = ev.value
+    elif ev.value is not None:
         d["value"] = ev.value
     return d
 
-def lint(p: IntentProgram) -> tuple[list[str], list[str]]:
-    """Return (errors, warnings). Errors trigger a retry."""
+def lint(p: IntentProgram, copied: list[str]) -> tuple[list[str], list[str]]:
     errors, warnings = [], []
     used = set()
     for i, s in enumerate(p.steps):
@@ -73,6 +79,14 @@ def lint(p: IntentProgram) -> tuple[list[str], list[str]]:
         for name, val in p.variables.items():
             if len(val) > 2 and val.lower() in VAR.sub("", text).lower():
                 errors.append(f"step {i} hard-codes {val!r}; use {{{{{name}}}}} instead")
+        for c in copied:
+            if len(c) > 3 and c.lower() in text.lower():
+                errors.append(f"step {i} contains copied text {c!r}; describe the data instead")
+        if s.op == "extract":
+            if not s.output:
+                errors.append(f"extract step {i} has no output name")
+            elif s.output not in p.outputs:
+                errors.append(f"extract step {i} output {s.output!r} missing from outputs")
     for name in p.variables.keys() - used:
         warnings.append(f"variable {name!r} is never used")
     if not any(s.op == "verify" for s in p.steps):
@@ -81,6 +95,7 @@ def lint(p: IntentProgram) -> tuple[list[str], list[str]]:
 
 async def abstract(trace: Trace, max_attempts: int = 2) -> tuple[IntentProgram, list[str]]:
     events = [compact(e) for e in trace.events]
+    copied = [e.value for e in trace.events if e.kind == "extract" and e.value]
     user = "Recorded session:\n" + json.dumps(events, indent=1)
     feedback = ""
     for attempt in range(max_attempts):
@@ -90,7 +105,7 @@ async def abstract(trace: Trace, max_attempts: int = 2) -> tuple[IntentProgram, 
         except ValidationError as e:
             feedback = f"\n\nYour previous answer was invalid:\n{e}\nFix it."
             continue
-        errors, warnings = lint(program)
+        errors, warnings = lint(program, copied)
         if not errors:
             return program, warnings
         feedback = ("\n\nYour previous answer had these problems:\n- " + "\n- ".join(errors) +
@@ -105,11 +120,12 @@ async def _main():
     out = DATA / "intents" / f"{name}.json"
     out.write_text(program.model_dump_json(indent=1))
 
-    print(f"GOAL: {program.goal}\nVARIABLES: {program.variables}\n")
+    print(f"GOAL: {program.goal}\nINPUTS: {program.variables}\nOUTPUTS: {program.outputs}\n")
     for i, s in enumerate(program.steps):
         opt = " (optional)" if s.optional else ""
         val = f"  <- {s.value}" if s.value else ""
-        print(f"{i:2}. {s.op:12} {s.target}{val}{opt}")
+        outp = f"  -> [{s.output}]" if s.output else ""
+        print(f"{i:2}. {s.op:12} {s.target}{val}{outp}{opt}")
     for w in warnings:
         print(f"warning: {w}")
     print(f"\nSaved to {out}")

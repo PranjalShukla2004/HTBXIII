@@ -4,11 +4,34 @@ from google.genai import types, errors
 from .config import (MODEL, FALLBACK_MODEL, DATA, GEMINI_API_KEY,
                      LLM_CONCURRENCY, LLM_TIMEOUT)
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+try:   # turn off the SDK's own hidden retries; we handle failover ourselves
+    client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(attempts=1)))
+except (AttributeError, TypeError):
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
 _sem = asyncio.Semaphore(LLM_CONCURRENCY)
+stats = {"calls": 0}
+STATUS_FILE = DATA / "model_status.json"
 
 class LLMError(Exception):
     pass
+
+def _load_status() -> dict[str, float]:
+    try:
+        now = time.time()
+        return {m: t for m, t in json.loads(STATUS_FILE.read_text()).items() if t > now}
+    except Exception:
+        return {}
+
+_unavailable: dict[str, float] = _load_status()      # model -> time it becomes usable again
+
+def _mark(model: str, seconds: float, persist: bool = False):
+    _unavailable[model] = time.time() + seconds
+    if persist:
+        now = time.time()
+        STATUS_FILE.write_text(json.dumps(
+            {m: t for m, t in _unavailable.items() if t - now > 300}, indent=1))
 
 def _extract_json(text: str):
     text = re.sub(r"```(?:json)?", "", text)
@@ -21,6 +44,10 @@ def _retry_delay(e: Exception) -> float | None:
     m = re.search(r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s", str(e))
     return float(m.group(1)) if m else None
 
+def _daily_exhausted(e: Exception) -> bool:
+    d = _retry_delay(e)
+    return "PerDay" in str(e) or (d is not None and d > 300)
+
 async def llm_json(system: str, user: str, *, max_tokens: int = 8192, tag: str = "llm",
                    retries: int = 6, cheap: bool = False):
     cfg = types.GenerateContentConfig(
@@ -29,33 +56,47 @@ async def llm_json(system: str, user: str, *, max_tokens: int = 8192, tag: str =
         max_output_tokens=max_tokens,
         temperature=0,
     )
-    models = [MODEL] + ([FALLBACK_MODEL] if FALLBACK_MODEL else [])
-    if cheap and FALLBACK_MODEL:
-        models.reverse()                       # easy calls go to the lite model first
-    idx, resp, model = 0, None, models[0]
+    fallbacks = [m.strip() for m in (FALLBACK_MODEL or "").split(",") if m.strip()]
+    models = [MODEL] + [m for m in fallbacks if m != MODEL]
+    if cheap:
+        models.sort(key=lambda m: "lite" not in m)      # stable: lite models first
+    resp, model = None, None
 
-    for attempt in range(retries):
-        model = models[idx % len(models)]
+    for attempt in range(retries + len(models)):
+        now = time.time()
+        live = [m for m in models if _unavailable.get(m, 0) <= now]
+        if not live:
+            wait = min(_unavailable[m] for m in models) - now
+            if wait > 90:
+                raise LLMError("all Gemini models are out of quota for now (daily limits reset "
+                               "~08:00 UK); enable billing or use another project's key")
+            print(f"[llm:{tag}] all models busy, waiting {wait:.0f}s")
+            await asyncio.sleep(wait)
+            continue
+        model = live[0]
         try:
             async with _sem:
                 resp = await asyncio.wait_for(
                     client.aio.models.generate_content(model=model, contents=user, config=cfg),
                     timeout=LLM_TIMEOUT)
+            stats["calls"] += 1
             break
         except (errors.APIError, TimeoutError) as e:
             code = getattr(e, "code", "timeout")
-            if code not in (429, 500, 503, "timeout") or attempt == retries - 1:
-                raise
-            idx += 1                            # other model has its own quota
-            switched = len(models) > 1
-            if switched and attempt == 0:
-                wait = 1                        # try the other model immediately
+            if code == 404:
+                _mark(model, 86400, persist=True)
+            elif code == 429 and _daily_exhausted(e):
+                _mark(model, _retry_delay(e) or 6 * 3600, persist=True)
+            elif code == 429:
+                _mark(model, min(_retry_delay(e) or 20, 90))
+            elif code in (500, 503, "timeout"):
+                _mark(model, 120)
             else:
-                wait = _retry_delay(e) or 3 * 2 ** attempt
-            wait = min(wait, 60)
-            print(f"[llm:{tag}] {model} -> {code}, next {models[idx % len(models)]} in {wait:.0f}s")
-            await asyncio.sleep(wait)
+                raise
+            print(f"[llm:{tag}] {model} -> {code}; switching model")
 
+    if resp is None:
+        raise LLMError(f"[{tag}] no response after trying {len(models)} models")
     text = resp.text or ""
     log_path = DATA / "logs" / f"{time.time():.3f}_{tag}.json"
     log_path.write_text(json.dumps({"model": model, "system": system,

@@ -140,31 +140,76 @@ async def dismiss_overlays(page: Page, aggressive: bool = False) -> bool:
         await page.wait_for_timeout(300)
     return clicked
 
+async def _click_landed(page: Page, el: Locator, url_before: str) -> bool:
+    """After a click 'fails', check whether it actually worked (page moved on)."""
+    try:
+        return page.url != url_before or await el.count() == 0
+    except Exception:
+        return True          # page was navigating while we checked
+
 async def robust_click(page: Page, el: Locator):
+    url_before = page.url
     try:
-        await el.click(timeout=4000); return
+        await el.click(timeout=6000)
+        return
     except Exception:
-        pass
+        if await _click_landed(page, el, url_before):
+            return           # click worked; the next page was just slow to load
     await dismiss_overlays(page, aggressive=True)
-    try:
-        await el.click(timeout=3000); return
-    except Exception:
-        pass
-    try:
-        await el.click(force=True, timeout=3000); return
-    except Exception:
-        pass
-    await el.evaluate("e => e.click()")
+    for attempt in (lambda: el.click(timeout=3000),
+                    lambda: el.click(force=True, timeout=3000),
+                    lambda: el.evaluate("e => e.click()", timeout=3000)):
+        try:
+            await attempt()
+            return
+        except Exception:
+            if await _click_landed(page, el, url_before):
+                return
+    raise RuntimeError("could not click the element (covered by something or removed)")
+
+def _q(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+async def resolve_locator(page: Page, loc: dict):
+    """Find a previously used element again from its saved semantic description."""
+    tag = loc.get("tag", "*")
+    cands = []
+    if loc.get("label"):
+        cands.append(page.get_by_label(loc["label"], exact=True))
+    if loc.get("ph"):
+        cands.append(page.get_by_placeholder(loc["ph"], exact=True))
+    if loc.get("aria"):
+        cands.append(page.locator(f'{tag}[aria-label="{_q(loc["aria"])}"]'))
+    if loc.get("name"):
+        cands.append(page.locator(f'{tag}[name="{_q(loc["name"])}"]'))
+    if loc.get("href") and tag == "a":
+        cands.append(page.locator(f'a[href="{_q(loc["href"])}"]'))
+    if loc.get("text") and tag not in ("input", "textarea"):
+        cands.append(page.locator(tag).filter(
+            has_text=re.compile(r"^\s*" + re.escape(loc["text"]) + r"\s*$")))
+    if loc.get("text") and (tag == "button" or loc.get("type") in ("button", "submit")):
+        cands.append(page.get_by_role("button", name=loc["text"], exact=True))
+    if loc.get("text") and tag == "input":
+        cands.append(page.locator(f'input[value="{_q(loc["text"])}"]'))
+    for c in cands:
+        try:
+            first = c.first
+            await first.wait_for(state="visible", timeout=2000)
+            return first
+        except Exception:
+            continue
+    return None
 
 async def act(page: Page, element: dict, op: str, value: str | None = None):
     el = page.locator(f'[data-agent-id="{element["id"]}"]').first
-    tag = element["tag"]
+    await act_on(page, el, element["tag"], op, value)
+
+async def act_on(page: Page, el: Locator, tag: str, op: str, value: str | None = None):
     try:
         await el.scroll_into_view_if_needed(timeout=3000)
     except Exception:
         pass
-
-    if tag == "select":                                   # dropdown, whatever the step called it
+    if tag == "select":
         try:
             await el.select_option(label=value)
         except Exception:
@@ -181,7 +226,7 @@ async def act(page: Page, element: dict, op: str, value: str | None = None):
     if op == "press":
         await el.press(value or "Enter")
         return
-    await robust_click(page, el)                          # click / navigate_to / custom pickers
+    await robust_click(page, el)
 
 async def page_text(page: Page, limit: int = 4000) -> str:
     text = await page.evaluate("() => document.body ? document.body.innerText : ''")
