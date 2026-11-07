@@ -72,7 +72,8 @@ async def verify(page, condition: str) -> dict:
 
 async def run_program(browser: Browser, url: str, program: IntentProgram, *,
                       variables: Optional[dict] = None,
-                      on_event: Optional[Callable[[AgentEvent], None]] = None) -> SiteResult:
+                      on_event: Optional[Callable[[AgentEvent], None]] = None,
+                      on_action: Optional[Callable[[dict], None]] = None) -> SiteResult:
     vars_ = {**program.variables, **(variables or {})}
     result = SiteResult(url=url, status="navigating")
 
@@ -112,6 +113,9 @@ async def run_program(browser: Browser, url: str, program: IntentProgram, *,
 
                 if status == "move" and hop < MAX_HOPS:
                     await act(page, el, "click")
+                    if on_action:
+                        on_action({"step": i, "op": "click", "target": target,
+                                   "element": el, "navigation_hop": True, "url": page.url})
                     await settle(page)
                     continue                       # retry the same step on the new page
                 break
@@ -131,6 +135,9 @@ async def run_program(browser: Browser, url: str, program: IntentProgram, *,
 
             typed = g.get("value") or value
             await act(page, el, step.op, typed)
+            if on_action:
+                on_action({"step": i, "op": step.op, "target": target,
+                           "value": typed, "element": el, "url": page.url})
             await settle(page)
             result.bindings.append(Binding(
                 step=i, value=typed,

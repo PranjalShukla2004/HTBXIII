@@ -1,0 +1,18 @@
+[project]
+name = "webagent-api"
+version = "0.1.0"
+description = "HTTP controls and WebSocket streams for webagent"
+requires-python = ">=3.12"
+dependencies = ["fastapi", "uvicorn[standard]", "webagent"]
+
+[tool.uv.sources]
+webagent = { path = "../webagent", editable = true }
+
+[dependency-groups]
+dev = ["pytest", "httpx2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = ["live: uses a real browser and makes billable Gemini API calls (opt in with RUN_LIVE_GEMINI=1)"]
