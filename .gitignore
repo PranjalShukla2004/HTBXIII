@@ -3,5 +3,8 @@ backend/webagent/data/
 .venv/
 backend/api/data/
 __pycache__/
+*.pyc
 .pytest_cache/
 backend/api/tests/result/
+service_account.json
+.agent-profile/

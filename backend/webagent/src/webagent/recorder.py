@@ -97,6 +97,15 @@ RECORDER_JS = r"""
     send({kind: 'fill', el: describe(el), value: el.value});
     send({kind: 'press', el: describe(el), value: 'Enter'});
   }, true);
+    // Copying text means "I want this data" -> becomes an extract step
+  document.addEventListener('copy', () => {
+    const sel = document.getSelection();
+    const text = clean(sel ? sel.toString() : '');
+    if (!text || !sel.anchorNode) return;
+    let el = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    el = el.closest('a') || el;              // copying link text captures the link itself
+    send({kind: 'extract', el: describe(el), value: text.slice(0, 200)});
+  }, true);
 })();
 """
 
@@ -140,8 +149,7 @@ async def record(start_url: str, *,
         if on_event:
             on_event(payload)
 
-    async with launch(headless=False) as browser:
-        context = await browser.new_context(viewport={"width": 1366, "height": 900})
+    async with launch(headless=False) as context:
         await context.expose_function("__record", emit)
         await context.add_init_script(RECORDER_JS)
 
@@ -152,7 +160,9 @@ async def record(start_url: str, *,
                     lambda _: all(p.is_closed() for p in context.pages) and done.set())
 
         context.on("page", watch)
-        page = await context.new_page()
+        for existing in context.pages:
+            watch(existing)
+        page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(start_url)
         await done.wait()
 

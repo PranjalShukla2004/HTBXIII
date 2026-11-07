@@ -77,7 +77,7 @@ async def collect_streams(base, job, directory, frames, timeout):
 
 
 def test_real_agent_gemini_and_websocket_output():
-    """Search, add to cart, and verify using four real Gemini decisions/checks."""
+    """Search, add to cart, and verify using real Gemini decisions/checks."""
     token = uuid4().hex
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     directory = RESULT_ROOT / f"{stamp}_{token[:8]}"
@@ -98,7 +98,8 @@ def test_real_agent_gemini_and_websocket_output():
                 reserved.bind(("127.0.0.1", 0))
                 port = reserved.getsockname()[1]
             base = f"http://127.0.0.1:{port}"
-            environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"}
+            environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+                           "PROFILE_DIR": str(directory / "browser_profile")}
             process = subprocess.Popen(
                 [sys.executable, "-B", str(Path(__file__).with_name("live_server.py")),
                  "--port", str(port), "--result-dir", str(directory),
@@ -146,11 +147,11 @@ def test_real_agent_gemini_and_websocket_output():
             write_json(directory / "gemini_responses.json", replies)
 
             assert final["status"] == "done", f"Agent ended with {final['status']}; inspect console.log and server.log"
-            assert len(replies) >= 4, "Expected real grounding and verification model responses"
+            assert len(replies) >= 3, "Expected real grounding and final-verification model responses"
             assert deltas, "No generated-text chunks reached the LLM WebSocket"
             assert [action["op"] for action in actions] == ["search", "click"]
             checks = [reply["response"] for reply in replies if reply["tag"] == "verify"]
-            assert len(checks) == 2 and all(check.get("passed") is True for check in checks)
+            assert len(checks) == 1 and checks[0].get("passed") is True
             assert len(final["result"]["bindings"]) == 2
             assert (directory / "screenshot.png").is_file()
             assert 'Clicked "Add to cart"' in (directory / "console.log").read_text(encoding="utf-8")

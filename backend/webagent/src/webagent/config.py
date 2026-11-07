@@ -19,6 +19,8 @@ LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "2"))
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 CHROMIUM_PATH = os.getenv("CHROMIUM_PATH") or None
+PROFILE_DIR = Path(os.getenv("PROFILE_DIR", str(REPO_ROOT / ".agent-profile")))
+DEFAULT_SHEET_URL = os.getenv("DEFAULT_SHEET_URL") or None
 
 if not GEMINI_API_KEY:
     raise RuntimeError(f"GEMINI_API_KEY missing; put it in {REPO_ROOT / '.env'}")

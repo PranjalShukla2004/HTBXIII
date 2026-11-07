@@ -1,0 +1,7 @@
+{
+  "northStar": "Graphite control surface; the run is watched, not read.",
+  "motion": { "slide-in": "0.4s cubic-bezier(0.16,1,0.3,1), translateY(6px) to 0", "blink": "1.2s, live step and live dots" },
+  "shadows": { "popover": "0 16px 40px rgb(0 0 0/.55)" },
+  "breakpoints": { "rail": "1024px", "windows-2": "640px", "windows-3": "1280px" },
+  "rules": ["accent = action/selection/live only", "tier colours = matcher tier only", "rec = recording only", "mono = data only"]
+}

@@ -29,19 +29,21 @@ agent, model client, or model responses.
 A controlled local shop page is the browsing target. The agent:
 
 1. Asks Gemini which search input to use, then searches for PS5.
-2. Asks Gemini to verify the search results.
+2. Advances past the intermediate search verification, as the runner now checks only the final verification step.
 3. Asks Gemini which Add to cart button to click, then clicks it.
 4. Asks Gemini to verify that the cart contains the console with quantity 1.
 
 The test connects to both real WebSocket endpoints while the job runs and
 prints generated model text and progress logs. It checks successful browser
-actions, real generated-text chunks, four completed model calls, successful
-verification responses, terminal frames, and a saved screenshot. Normally
-this makes four Gemini requests; retries can add requests and API usage.
+actions, real generated-text chunks, completed model calls, a successful
+verification response, terminal frames, and a saved screenshot. Normally
+this makes three Gemini requests (two grounding calls and the final check);
+model failover can add requests and API usage.
 
 The subprocess has its own model client and event loop, so it cannot reuse
 the mocked model client from the unit tests. The server and browser are
-stopped automatically, including after failure. Your saved shopping skills
+stopped automatically, including after failure. The persistent browser
+profile is isolated under the result folder. Your saved shopping skills
 are not overwritten. The overall default job limit is 240 seconds; set
 `LIVE_GEMINI_TIMEOUT_SECONDS` to change it.
 
@@ -73,6 +75,7 @@ runs keep their available diagnostics too.
 | `request.json`, `skill.json` | The submitted run request and the four-step skill. |
 | `metadata.json` | Configured model and provider-log location, with no API key. |
 | `skills/`, `jobs/` | The test's isolated API skill store and job artifacts. |
+| `browser_profile/` | The test's isolated persistent Chromium profile. |
 
 For example, after the run shown above:
 
