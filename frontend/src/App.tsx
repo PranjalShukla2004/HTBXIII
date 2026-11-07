@@ -3,12 +3,14 @@ import { PanelLeft, SquarePen, X } from 'lucide-react'
 import { useStore } from './store'
 import { Logo, Rail } from './components/Rail'
 import { Composer, Thread } from './components/Chat'
+import { LearnPanel } from './components/LearnPanel'
 import { cx } from './lib/ui'
 
 export default function App() {
   const loadSkills = useStore((s) => s.loadSkills)
   const hasMessages = useStore((s) => s.messages.length > 0)
   const newChat = useStore((s) => s.newChat)
+  const recording = useStore((s) => s.recording.status !== 'idle')
   const [drawer, setDrawer] = useState(false)
   useRunStatusInTitle()
 
@@ -48,7 +50,7 @@ export default function App() {
           )}
         </header>
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-          <Thread />
+          {recording ? <LearnPanel /> : <Thread />}
         </div>
         <Composer />
       </main>

@@ -93,7 +93,10 @@ export type RunEvent =
       status: 'running' | 'ok' | 'failed' | 'skipped'
       tier?: Tier
     }
-  | { type: 'heal'; targetId: string; stepIndex: number; message: string; learned?: { action_type: string; phrase: string } }
+  /** `recorded` is the label the user clicked while recording; `phrase` is what this site calls it. */
+  | { type: 'heal'; targetId: string; stepIndex: number; message: string; learned?: { action_type: string; phrase: string; recorded?: string } }
+  /** The site stopped mid-run for a person (captcha, login). `resumable` means `resumeTarget` can continue it. */
+  | { type: 'needs_human'; targetId: string; message: string; resumable?: boolean }
   | { type: 'browser'; targetId: string; status: 'opened' | 'closed'; url: string }
   /** Live preview for the mini browser window. JPEG data URL or http URL, ~2-4 fps is plenty. */
   | { type: 'frame'; targetId: string; image: string; url?: string; final?: boolean }
@@ -120,4 +123,6 @@ export interface AgentApi {
   startRun(req: { skillIds: string[]; prompt: string }): Promise<{ runId: string }>
   onRunEvents(runId: string, cb: (e: RunEvent) => void): Unsubscribe
   stopRun(runId: string): Promise<void>
+  /** Continue a site after the person has handled it. Only the mock supports this today. */
+  resumeTarget?(runId: string, targetId: string): Promise<void>
 }

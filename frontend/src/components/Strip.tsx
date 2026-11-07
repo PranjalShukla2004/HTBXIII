@@ -30,8 +30,8 @@ export function Field({ className, children }: { className?: string; children: R
 }
 
 /** Letter mark for a skill or site. */
-export function Avatar({ name, size = 22 }: { name: string; size?: number }) {
-  const c = avatarColor(name)
+export function Avatar({ name, size = 22, color }: { name: string; size?: number; color?: string }) {
+  const c = color ?? avatarColor(name)
   return (
     <span
       className="grid shrink-0 place-items-center rounded-md text-[11px] font-semibold"

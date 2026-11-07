@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { api } from './api'
 import type { RecordedAction, ResultTable, RunEvent, RunTarget, Skill, SkillDraft, Tier } from './api'
+import { loadStats, saveStats, withRun } from './lib/stats'
+import type { SkillStats } from './lib/stats'
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -17,7 +19,21 @@ export interface TargetState extends RunTarget {
   frameFinal?: boolean
   /** Phrase learned by self-heal on this site. */
   learned?: string
+  /** Position in the run; fixes the site's colour. */
+  index: number
+  /** The self-heal moment: what you clicked when recording, and what this site calls it. */
+  heal?: { from?: string; to: string; stepIndex: number; at: number }
+  /** Paused for a person. */
+  blocked?: { message: string; resumable: boolean; at: number }
+  /** The person has taken over this site. */
+  takeover?: boolean
+  /** Milliseconds into the run when the result was read. */
+  foundAt?: number
+  /** Screenshot at the moment the result was read, when the backend sent one. */
+  evidence?: string
 }
+
+export type FocusReason = 'heal' | 'needs' | 'price' | 'live'
 
 export interface LogLine {
   id: string
@@ -34,6 +50,7 @@ export interface LogLine {
 
 export interface RunState {
   runId?: string
+  prompt: string
   status: 'starting' | 'planning' | 'running' | 'done' | 'failed' | 'stopped' | 'needs_human'
   startedAt: number
   finishedAt?: number
@@ -49,6 +66,10 @@ export interface RunState {
   error?: string
   stopping?: boolean
   connections?: Record<string, string>
+  /** Which site the spotlight shows, chosen by the director. */
+  focus?: { id: string; reason: FocusReason; prio: number; at: number }
+  /** Site the person clicked; overrides the director until cleared. */
+  pinned?: string | null
 }
 
 export type ChatMessage =
@@ -62,6 +83,7 @@ export interface Recording {
   url: string
   sessionId?: string
   startedAt?: number
+  stoppedAt?: number
   actions: RecordedAction[]
   draft?: SkillDraft
   error?: string
@@ -79,6 +101,7 @@ interface Store {
   recording: Recording
   inspectId: string | null
   justSavedId: string | null
+  stats: Record<string, SkillStats>
 
   loadSkills(): Promise<void>
   toggleAttach(id: string): void
@@ -90,6 +113,9 @@ interface Store {
   runWith(msgId: string, skillId: string): void
   stopRun(msgId: string): Promise<void>
   approve(msgId: string): void
+  pin(msgId: string, targetId: string | null): void
+  takeOver(msgId: string, targetId: string): void
+  handBack(msgId: string, targetId: string): Promise<void>
   newChat(): void
   dispose(): void
 
@@ -97,6 +123,28 @@ interface Store {
   stopRecording(): Promise<void>
   cancelRecording(): Promise<void>
   saveDraft(name: string, description: string): Promise<void>
+}
+
+/** How long an interesting moment keeps the spotlight before something less urgent can take it. */
+export const HOLD = 2800
+
+/** The TV director: decide whether this event should move the spotlight. */
+function direct(r: RunState, id: string, reason: FocusReason, prio: number): RunState {
+  const now = Date.now()
+  const f = r.focus
+  const next = { ...r, focus: { id, reason, prio, at: now } }
+  if (!f) return next
+  if (f.id === id) return prio >= f.prio ? next : r
+  const cur = r.targets.find((t) => t.id === f.id)
+  const busy = cur && (cur.status === 'running' || (cur.status === 'needs_human' && cur.blocked?.resumable))
+  // A self-heal is brief, so it may cut in on a site that is waiting for a person.
+  if (reason === 'heal' && f.reason === 'needs') return next
+  if (now - f.at < HOLD && prio <= f.prio) return r
+  // A site waiting for a person can lose the spotlight briefly (a self-heal), then gets it back.
+  const waiting = r.targets.find((t) => t.status === 'needs_human' && t.blocked?.resumable && t.id !== f.id)
+  if (waiting && prio < 3 && now - f.at >= HOLD) return { ...r, focus: { id: waiting.id, reason: 'needs', prio: 3, at: now } }
+  if (prio === 1 && busy) return r
+  return next
 }
 
 let recUnsub: (() => void) | null = null
@@ -133,12 +181,12 @@ export const useStore = create<Store>((set, get) => {
           status: 'running',
           plan: e.summary,
           variables: e.variables,
-          targets: e.targets.map((t) => ({ ...t, status: 'queued', stepIndex: 0, totalSteps: 0, tiers: [], browserOpen: false })),
+          targets: e.targets.map((t, index) => ({ ...t, index, status: 'queued', stepIndex: 0, totalSteps: 0, tiers: [], browserOpen: false })),
         }
       case 'target_start':
-        return patchTarget(r, e.targetId, (t) => ({ ...t, status: 'running', totalSteps: e.totalSteps }))
-      case 'step':
-        return patchTarget(r, e.targetId, (t) => {
+        return direct(patchTarget(r, e.targetId, (t) => ({ ...t, status: 'running', totalSteps: e.totalSteps })), e.targetId, 'live', 1)
+      case 'step': {
+        const next = patchTarget(r, e.targetId, (t) => {
           const tiers = [...t.tiers]
           if (e.status === 'ok' && e.tier) tiers[e.stepIndex] = e.tier
           if (e.status === 'skipped') tiers[e.stepIndex] = 'skipped'
@@ -147,16 +195,25 @@ export const useStore = create<Store>((set, get) => {
             currentStep: e.description,
             stepIndex: Math.max(t.stepIndex, e.status === 'running' ? e.stepIndex : e.stepIndex + 1),
             tiers,
-            status: e.status === 'failed' ? 'failed' : t.status,
+            status: e.status === 'failed' ? 'failed' : t.blocked ? 'running' : t.status,
+            blocked: undefined,
+            takeover: false,
           }
         })
+        return direct(next, e.targetId, 'live', 1)
+      }
       case 'heal': {
         const name = r.targets.find((t) => t.id === e.targetId)?.name ?? e.targetId
         const next = { ...r, heals: [...r.heals, { target: name, message: e.message, phrase: e.learned?.phrase }] }
-        return patchTarget(next, e.targetId, (t) => ({ ...t, learned: e.learned?.phrase ?? e.message }))
+        const to = e.learned?.phrase ?? e.message
+        return direct(patchTarget(next, e.targetId, (t) => ({ ...t, learned: to,
+          heal: { from: e.learned?.recorded, to, stepIndex: e.stepIndex, at: Date.now() } })), e.targetId, 'heal', 3)
       }
+      case 'needs_human':
+        return direct(patchTarget(r, e.targetId, (t) => ({ ...t, status: 'needs_human', currentStep: e.message,
+          blocked: { message: e.message, resumable: !!e.resumable && !!api.resumeTarget, at: Date.now() } })), e.targetId, 'needs', 3)
       case 'frame':
-        return patchTarget(r, e.targetId, (t) => ({ ...t, frame: e.image, frameFinal: e.final }))
+        return patchTarget(r, e.targetId, (t) => ({ ...t, frame: e.image, frameFinal: e.final, evidence: e.final ? e.image : t.evidence }))
       case 'browser':
         return patchTarget(r, e.targetId, (t) => ({ ...t, browserOpen: e.status === 'opened' }))
       case 'connection':
@@ -195,15 +252,22 @@ export const useStore = create<Store>((set, get) => {
           ],
         }
       }
-      case 'target_done':
-        return patchTarget(r, e.targetId, (t) => ({
+      case 'target_done': {
+        const next = patchTarget(r, e.targetId, (t) => ({
           ...t,
           status: e.status,
           result: e.result,
           stepIndex: e.status === 'ok' ? t.totalSteps : t.stepIndex,
           browserOpen: false,
           currentStep: e.message ?? (e.status === 'ok' ? 'Finished' : t.currentStep),
+          foundAt: e.result ? Date.now() - r.startedAt : undefined,
+          evidence: t.evidence ?? t.frame,
+          blocked: e.status === 'needs_human' ? { message: e.message ?? 'Needs a person', resumable: false, at: Date.now() } : undefined,
+          takeover: false,
         }))
+        if (e.status === 'needs_human') return direct(next, e.targetId, 'needs', 3)
+        return e.status === 'ok' && e.result ? direct(next, e.targetId, 'price', 2) : next
+      }
       case 'done':
         return { ...r, status: e.status ?? 'done', finishedAt: Date.now(), summary: e.summary, table: e.table,
           needsApproval: e.needsApproval, error: e.status && e.status !== 'done' ? e.summary : undefined }
@@ -221,7 +285,7 @@ export const useStore = create<Store>((set, get) => {
 
   const launch = async (skillIds: string[], prompt: string) => {
     const msgId = uid()
-    const run: RunState = { status: 'starting', startedAt: Date.now(), variables: {}, targets: [], logs: [], heals: [] }
+    const run: RunState = { status: 'starting', prompt, startedAt: Date.now(), variables: {}, targets: [], logs: [], heals: [] }
     set((s) => ({ messages: [...s.messages, { id: msgId, role: 'assistant', kind: 'run', skillIds, run }] }))
     try {
       const { runId } = await api.startRun({ skillIds, prompt })
@@ -234,6 +298,7 @@ export const useStore = create<Store>((set, get) => {
       let finished = false
       const unsub = api.onRunEvents(runId, (e) => {
         patchRun(msgId, (r) => reduce(r, e))
+        if (e.type === 'done') remember(msgId, skillIds[0])
         if (e.type === 'done' || e.type === 'error') {
           finished = true
           runSubscriptions.get(msgId)?.()
@@ -248,8 +313,21 @@ export const useStore = create<Store>((set, get) => {
     }
   }
 
+  /** Fold a finished run into the skill's history. */
+  const remember = (msgId: string, skillId: string) => {
+    const msg = get().messages.find((m) => m.id === msgId)
+    if (!msg || msg.role !== 'assistant' || msg.kind !== 'run') return
+    const r = msg.run
+    const sites = r.targets.filter((t) => t.status !== 'queued').map((t) => ({ name: t.name, ok: t.status === 'ok' }))
+    const phrases = r.heals.flatMap((h) => (h.phrase ? [h.phrase] : []))
+    const stats = { ...get().stats, [skillId]: withRun(get().stats[skillId], sites, phrases) }
+    saveStats(stats)
+    set({ stats })
+  }
+
   return {
     skills: [],
+    stats: loadStats(),
     skillsLoaded: false,
     agentConnected: false,
     attached: [],
@@ -334,6 +412,18 @@ export const useStore = create<Store>((set, get) => {
     approve(msgId) {
       patchRun(msgId, (r) => ({ ...r, approved: true }))
     },
+    pin(msgId, targetId) {
+      patchRun(msgId, (r) => ({ ...r, pinned: targetId }))
+    },
+    takeOver(msgId, targetId) {
+      patchRun(msgId, (r) => ({ ...patchTarget(r, targetId, (t) => ({ ...t, takeover: true })), pinned: targetId }))
+    },
+    async handBack(msgId, targetId) {
+      const msg = get().messages.find((m) => m.id === msgId)
+      if (!msg || msg.role !== 'assistant' || msg.kind !== 'run' || !msg.run.runId) return
+      patchRun(msgId, (r) => ({ ...patchTarget(r, targetId, (t) => ({ ...t, takeover: false, currentStep: 'Handing back to the agent' })), pinned: null }))
+      await api.resumeTarget?.(msg.run.runId, targetId)
+    },
     newChat() {
       for (const msg of get().messages) {
         if (msg.role === 'assistant' && msg.kind === 'run' && msg.run.runId && ['starting', 'planning', 'running'].includes(msg.run.status)) void api.stopRun(msg.run.runId).catch(() => {})
@@ -360,7 +450,7 @@ export const useStore = create<Store>((set, get) => {
           if (get().recording.sessionId !== sessionId || epoch !== recEpoch) return
           if (event.type === 'action') set((s) => ({ recording: { ...s.recording,
             actions: s.recording.actions.some((action) => action.id === event.action.id) ? s.recording.actions : [...s.recording.actions, event.action] } }))
-          else if (event.type === 'processing') set((s) => ({ recording: { ...s.recording, status: 'compiling' } }))
+          else if (event.type === 'processing') set((s) => ({ recording: { ...s.recording, status: 'compiling', stoppedAt: s.recording.stoppedAt ?? Date.now() } }))
           else if (event.type === 'connection') set((s) => ({ recording: { ...s.recording, connection: event.state } }))
           else if (event.type === 'compiled') {
             set((s) => ({ recording: { ...s.recording, status: 'review', draft: event.draft } }))
@@ -377,7 +467,7 @@ export const useStore = create<Store>((set, get) => {
     async stopRecording() {
       const rec = get().recording
       if (!rec.sessionId) return
-      set({ recording: { ...rec, status: 'compiling' } })
+      set({ recording: { ...rec, status: 'compiling', stoppedAt: Date.now() } })
       try {
         const draft = await api.stopRecording(rec.sessionId)
         if (get().recording.sessionId === rec.sessionId) {
@@ -403,7 +493,11 @@ export const useStore = create<Store>((set, get) => {
       let skill: Skill
       try { skill = await api.saveSkill({ ...rec.draft, name, description }) }
       catch (error) { set((s) => ({ recording: { ...s.recording, saving: false, error: String(error) } })); return }
+      const recordedMs = rec.startedAt ? (rec.stoppedAt ?? Date.now()) - rec.startedAt : undefined
+      const stats = { ...get().stats, [skill.id]: { runs: 0, sites: {}, phrases: [], recordedMs } }
+      saveStats(stats)
       set((s) => ({
+        stats,
         skills: [skill, ...s.skills.filter((k) => k.id !== skill.id)],
         recording: { status: 'idle', url: rec.url, actions: [] },
         justSavedId: skill.id,

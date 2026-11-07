@@ -33,6 +33,50 @@
   --animate-blink: blink 1.2s ease-in-out infinite;
   --animate-slide-in: slide-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-caret: caret 1s steps(1) infinite;
+  --animate-fade-in: fade-in 0.3s ease-out both;
+  --animate-draw: draw 0.5s cubic-bezier(0.65, 0, 0.35, 1) 0.25s both;
+  --animate-ripple: ripple 0.7s ease-out 0.55s both;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+}
+@keyframes draw {
+  from { transform: scale(0); }
+}
+@keyframes ripple {
+  from { r: 4; opacity: 0.9; }
+  to { r: 22; opacity: 0; }
+}
+@keyframes shake {
+  0%, 100% { transform: none; }
+  20% { transform: translateX(-5px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
+}
+@keyframes attn {
+  0%, 100% { outline-offset: 0; outline-color: color-mix(in srgb, var(--color-fuzzy) 80%, transparent); }
+  50% { outline-offset: 5px; outline-color: color-mix(in srgb, var(--color-fuzzy) 0%, transparent); }
+}
+@keyframes flash {
+  0%, 100% { box-shadow: inset 0 0 0 2px var(--color-heal); }
+  50% { box-shadow: inset 0 0 0 2px transparent; }
+}
+
+/* A site waiting for a person: one shake, then a slow amber pulse. */
+.needs {
+  outline: 2px solid var(--color-fuzzy);
+  animation: shake 0.5s ease-in-out, attn 1.6s ease-in-out 0.5s infinite;
+}
+.heal-flash { animation: flash 0.8s ease-in-out 4; }
+
+/* Paper receipt edge. */
+.perforated {
+  --hole: radial-gradient(circle at 6px 0, var(--color-bg) 4px, transparent 4.5px);
+  background-image: var(--hole);
+  background-size: 12px 8px;
+  background-repeat: repeat-x;
 }
 
 @keyframes blink {

@@ -4,6 +4,8 @@ import { useStore } from '../store'
 import type { Skill, Step } from '../api'
 import { USE_MOCK } from '../api'
 import { clock, cx, hostOf, timeAgo } from '../lib/ui'
+import { successRate } from '../lib/stats'
+import type { SkillStats } from '../lib/stats'
 import { Avatar, Field, Strip } from './Strip'
 
 export function Rail({ onPicked }: { onPicked?: () => void }) {
@@ -21,7 +23,6 @@ export function Rail({ onPicked }: { onPicked?: () => void }) {
       </div>
 
       <RecordControl />
-      <DraftStrip />
 
       <div className="flex items-center justify-between px-4 pt-5 pb-2 text-[12px] text-fg-3">
         <span className="font-medium">Skills</span>
@@ -144,71 +145,12 @@ function RecordControl() {
   )
 }
 
-/** After Stop, the recording prints as a new strip that you name. */
-function DraftStrip() {
-  const rec = useStore((s) => s.recording)
-  const save = useStore((s) => s.saveDraft)
-  const cancel = useStore((s) => s.cancelRecording)
-  const [name, setName] = useState('')
-  const [open, setOpen] = useState(false)
-
-  if (rec.status !== 'compiling' && rec.status !== 'review') return null
-  const draft = rec.draft
-
-  return (
-    <div className="mx-3 mt-3 animate-slide-in">
-      {!draft ? (
-        <Strip tone="ghost" className="h-11">
-          <Field className="flex-1 border-rule text-[13px]">
-            <span className="animate-blink">Reading {rec.actions.length} actions…</span>
-          </Field>
-        </Strip>
-      ) : (
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault()
-            if (!name.trim()) return
-            await save(name.trim(), draft.description)
-            if (useStore.getState().recording.status === 'idle') setName('')
-          }}
-        >
-          <Strip tone="chip" className="h-11">
-            <Field className="flex-1">
-              <input
-                autoFocus
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Name this skill"
-                aria-label="Skill name"
-                className="w-full bg-transparent text-[14px] font-semibold outline-none placeholder:font-normal placeholder:text-fg-3"
-              />
-            </Field>
-            <Field className="tabular font-mono text-[11px]">{draft.steps.length}</Field>
-          </Strip>
-          <div className="mt-1.5 flex items-center gap-1">
-            <button type="button" onClick={() => setOpen((o) => !o)} className="flex h-8 items-center gap-1 rounded px-2 text-[12px] text-fg-3 hover:text-fg">
-              <ChevronDown className={cx('size-3.5 transition', open && 'rotate-180')} /> Steps
-            </button>
-            <button type="button" disabled={rec.saving} onClick={() => void cancel()} className="ml-auto h-8 rounded px-2 text-[12px] text-fg-3 hover:text-fg disabled:opacity-40">
-              Discard
-            </button>
-            <button type="submit" disabled={!name.trim() || rec.saving} className="h-8 rounded-lg bg-fg px-3 text-[12px] font-semibold text-bg disabled:opacity-40">
-              {rec.saving ? 'Saving…' : 'Save'}
-            </button>
-          </div>
-          {open && <StepList steps={draft.steps} />}
-          {rec.error && <p role="alert" className="mt-2 text-[12px] text-heal">{rec.error}</p>}
-        </form>
-      )}
-    </div>
-  )
-}
-
 function SkillStrip({ skill, onPicked }: { skill: Skill; onPicked?: () => void }) {
   const attached = useStore((s) => s.attached.includes(skill.id))
   const fresh = useStore((s) => s.justSavedId === skill.id)
   const toggle = useStore((s) => s.toggleAttach)
   const del = useStore((s) => s.deleteSkill)
+  const stats = useStore((s) => s.stats[skill.id])
   const [open, setOpen] = useState(false)
 
   return (
@@ -252,10 +194,51 @@ function SkillStrip({ skill, onPicked }: { skill: Skill; onPicked?: () => void }
               {skill.runs !== undefined && `${skill.runs} runs`}{skill.runs !== undefined && skill.createdAt && ' · '}{skill.createdAt && timeAgo(skill.createdAt)}
             </span>
           </div>
+          <SkillHistory stats={stats} />
           <StepList steps={skill.steps} />
           <button onClick={() => void del(skill.id)} className="mt-1 flex h-7 items-center gap-1.5 rounded px-2 text-[12px] text-fg-3 hover:text-heal">
             <Trash2 className="size-3" /> Delete
           </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** What the skill has done so far: sites it worked on, success rate, phrases it picked up. */
+function SkillHistory({ stats }: { stats?: SkillStats }) {
+  const rate = successRate(stats)
+  const sites = Object.entries(stats?.sites ?? {})
+  if (!rate && !stats?.phrases.length) return null
+  return (
+    <div className="mb-2 space-y-2 rounded-lg bg-panel/70 px-2.5 py-2 ring-1 ring-rule">
+      {rate && (
+        <div>
+          <div className="flex items-baseline justify-between text-[12px]">
+            <span className="text-fg-2">Finished on {rate.ok} of {rate.tries} sites</span>
+            <span className="tabular font-mono text-[11px] text-fg-3">{Math.round((rate.ok / rate.tries) * 100)}%</span>
+          </div>
+          <div className="mt-1 h-1 rounded-full bg-chip">
+            <div className="h-full rounded-full bg-exact" style={{ width: `${(rate.ok / rate.tries) * 100}%` }} />
+          </div>
+        </div>
+      )}
+      {sites.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {sites.map(([name, s]) => (
+            <span key={name} className="flex items-center gap-1 rounded bg-chip px-1.5 py-0.5 text-[11px] text-fg-2" title={`${s.ok} of ${s.tries} finished`}>
+              <span className={cx('size-1.5 rounded-full', s.ok === s.tries ? 'bg-exact' : s.ok ? 'bg-fuzzy' : 'bg-heal')} />
+              {name}
+            </span>
+          ))}
+        </div>
+      )}
+      {!!stats?.phrases.length && (
+        <div className="flex flex-wrap items-center gap-1 text-[11px]">
+          <span className="text-fg-3">Learned</span>
+          {stats.phrases.map((p) => (
+            <span key={p} className="rounded bg-fuzzy/10 px-1.5 py-0.5 text-fuzzy">“{p}”</span>
+          ))}
         </div>
       )}
     </div>

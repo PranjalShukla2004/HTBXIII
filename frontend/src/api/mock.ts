@@ -113,7 +113,7 @@ function isShop(url: string) {
 
 /* ---------------- Runs ---------------- */
 
-const runs = new Map<string, { stopped: boolean; listeners: Set<(e: RunEvent) => void>; backlog: RunEvent[] }>()
+const runs = new Map<string, { stopped: boolean; listeners: Set<(e: RunEvent) => void>; backlog: RunEvent[]; resume: Map<string, () => void> }>()
 
 function extractVars(prompt: string, skill: Skill): Record<string, string> {
   const vars: Record<string, string> = {}
@@ -162,6 +162,9 @@ async function simulateRun(runId: string, skillIds: string[], prompt: string) {
 
   const skill = skills.find((s) => s.id === skillIds[0]) ?? skills[0]
   const shop = skill.id === 'sk_shop' || isShop(skill.site.url)
+  // One site self-heals on the final button; another hits a human check, so the demo shows both.
+  const healStep = Math.min(shop ? 5 : 6, skill.steps.length - 1)
+  const blockStep = Math.min(3, skill.steps.length - 1)
   await wait(400)
   log(`Loaded skill “${skill.name}” (${skill.steps.length} steps)`)
   log('Mapping the request onto skill variables…', 'debug')
@@ -189,7 +192,26 @@ async function simulateRun(runId: string, skillIds: string[], prompt: string) {
       if (r.stopped) return null
       emit({ type: 'step', targetId: t.id, stepIndex: si, description: describe(step, vars), status: 'running' })
       await wait(900 + Math.random() * 700)
-      const tier = TIER_PLAN[ti % 3][si % 8]
+      if (ti === 2 && si === blockStep) {
+        log('Page shows a human check; pausing this site', 'warn', t.id)
+        emit({ type: 'needs_human', targetId: t.id, message: 'This site wants to check you’re human', resumable: true })
+        const handled = await Promise.race([
+          new Promise<boolean>((res) => r.resume.set(t.id, () => res(true))),
+          wait(45_000).then(() => false),
+        ])
+        r.resume.delete(t.id)
+        if (r.stopped) return null
+        if (!handled) {
+          emit({ type: 'target_done', targetId: t.id, status: 'needs_human', message: 'Waited for a person; skipped this site' })
+          emit({ type: 'browser', targetId: t.id, status: 'closed', url: t.url })
+          return null
+        }
+        log('Check passed; agent has control again', 'info', t.id)
+        emit({ type: 'step', targetId: t.id, stepIndex: si, description: describe(step, vars), status: 'running' })
+        await wait(700)
+      }
+      const planned = TIER_PLAN[ti % 3][si % 8]
+      const tier: Tier = ti === 1 && si === healStep ? 'heal' : planned === 'heal' ? 'synonym' : planned
       log(`aria_snapshot: ${18 + Math.floor(Math.random() * 30)} interactive nodes`, 'debug', t.id)
       if (step.optional && ti === 2) {
         emit({ type: 'step', targetId: t.id, stepIndex: si, description: describe(step, vars), status: 'skipped' })
@@ -205,9 +227,10 @@ async function simulateRun(runId: string, skillIds: string[], prompt: string) {
           targetId: t.id,
           stepIndex: si,
           message: `Learned “${phrase}”`,
-          learned: { action_type: step.action_type ?? 'unknown', phrase },
+          learned: { action_type: step.action_type ?? 'unknown', phrase, recorded: shop ? 'Add to basket' : 'Request quote' },
         })
         log(`Self-heal → element 14 “${phrase}”. Added to synonym library.`, 'info', t.id)
+        await wait(2600) // hold so the moment can be seen
       } else {
         log(`${tier.toUpperCase()} match for ${step.action_type ?? step.intent}`, 'debug', t.id)
       }
@@ -229,8 +252,8 @@ async function simulateRun(runId: string, skillIds: string[], prompt: string) {
   await wait(400)
   const table = shop
     ? {
-        columns: ['Shop', 'Product', 'Each', 'Total'],
-        rows: results.map((x) => [x.shop, x.product, x.unit, x.total]),
+        columns: ['Shop', 'Product', 'Each', 'Total', 'Delivery'],
+        rows: results.map((x) => [x.shop, x.product, x.unit, x.total, x.delivery]),
       }
     : {
         columns: ['Supplier', 'Each', 'Total', 'Lead time'],
@@ -260,7 +283,8 @@ function shopResult(t: RunTarget, v: Record<string, string>, i: number) {
   const unit = Math.round(budget * [0.94, 0.86, 0.91][i] * 100) / 100
   const qty = Number(v.qty ?? 1)
   const names = ['Nimbus 14 Pro', 'Aero Book S', 'Lumen 15 Air']
-  return { shop: t.name, product: `${names[i]} ${v.product ?? ''}`.trim(), unit: gbp(unit), qty, total: gbp(unit * qty) }
+  return { shop: t.name, product: `${names[i]} ${v.product ?? ''}`.trim(), unit: gbp(unit), qty, total: gbp(unit * qty),
+    delivery: ['Next week', 'Tomorrow', '3–5 days'][i], rating: [4.2, 4.6, 4.4][i] }
 }
 function quoteResult(t: RunTarget, v: Record<string, string>, i: number) {
   const qty = Number(v.qty ?? 500)
@@ -335,7 +359,7 @@ export const mockApi: AgentApi = {
 
   async startRun({ skillIds, prompt }) {
     const runId = 'run_' + uid()
-    runs.set(runId, { stopped: false, listeners: new Set(), backlog: [] })
+    runs.set(runId, { stopped: false, listeners: new Set(), backlog: [], resume: new Map() })
     void simulateRun(runId, skillIds, prompt)
     return { runId }
   },
@@ -348,6 +372,11 @@ export const mockApi: AgentApi = {
   },
   async stopRun(runId) {
     const r = runs.get(runId)
-    if (r) r.stopped = true
+    if (!r) return
+    r.stopped = true
+    r.resume.forEach((go) => go())
+  },
+  async resumeTarget(runId, targetId) {
+    runs.get(runId)?.resume.get(targetId)?.()
   },
 }

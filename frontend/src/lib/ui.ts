@@ -48,3 +48,7 @@ export function hostOf(url: string) {
 }
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
+
+/** Identity colours for the sites in one run, in fixed order (validated for CVD on the panel surface). */
+export const SITE_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181']
+export const siteColor = (index: number) => SITE_COLORS[index] ?? 'var(--color-fg-3)'
