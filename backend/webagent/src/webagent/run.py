@@ -3,10 +3,10 @@ from typing import Callable, Optional
 from urllib.parse import urlparse
 from playwright.async_api import Browser
 from .abstract import VAR, FORBIDDEN
-from .browser import launch
+from .browser import launch, new_context
+from .page import describe_page, format_elements, act, settle, page_text, dismiss_overlays
 from .config import DATA
 from .llm import llm_json
-from .page import describe_page, format_elements, act, settle, page_text
 from .schemas import IntentProgram, Step, SiteResult, Binding, AgentEvent
 
 MAX_HOPS = 2
@@ -68,7 +68,8 @@ async def ground(page, program: IntentProgram, step: Step, target: str, value: O
 
 async def verify(page, condition: str) -> dict:
     text = await page_text(page)
-    return await llm_json(VERIFY_SYSTEM, f"CONDITION: {condition}\n\nPAGE TEXT:\n{text}", tag="verify")
+    return await llm_json(VERIFY_SYSTEM, f"CONDITION: {condition}\n\nPAGE TEXT:\n{text}",
+                          tag="verify", cheap=True)
 
 async def run_program(browser: Browser, url: str, program: IntentProgram, *,
                       variables: Optional[dict] = None,
@@ -80,11 +81,12 @@ async def run_program(browser: Browser, url: str, program: IntentProgram, *,
         if on_event:
             on_event(AgentEvent(kind=kind, site=url, message=message, data=data))
 
-    context = await browser.new_context(viewport={"width": 1366, "height": 900})
+    context = await new_context(browser)
     page = await context.new_page()
     try:
         await page.goto(url, wait_until="domcontentloaded")
         await settle(page)
+        await dismiss_overlays(page)
         result.status = "acting"
         emit("status", "acting")
 
@@ -99,6 +101,7 @@ async def run_program(browser: Browser, url: str, program: IntentProgram, *,
                 continue
 
             for hop in range(MAX_HOPS + 1):
+                await dismiss_overlays(page)
                 els = await describe_page(page)
                 g = await ground(page, program, step, target, value, els)
                 status, eid = g.get("status"), g.get("element_id")

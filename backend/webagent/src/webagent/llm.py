@@ -17,20 +17,25 @@ def _extract_json(text: str):
         raise LLMError(f"No JSON in response: {text[:300]}")
     return json.loads(match.group(1))
 
-def _model_for(attempt: int) -> str:
-    return FALLBACK_MODEL if (FALLBACK_MODEL and attempt >= 2) else MODEL
+def _retry_delay(e: Exception) -> float | None:
+    m = re.search(r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s", str(e))
+    return float(m.group(1)) if m else None
 
-async def llm_json(system: str, user: str, *, max_tokens: int = 8192,
-                   tag: str = "llm", retries: int = 5):
+async def llm_json(system: str, user: str, *, max_tokens: int = 8192, tag: str = "llm",
+                   retries: int = 6, cheap: bool = False):
     cfg = types.GenerateContentConfig(
         system_instruction=system,
         response_mime_type="application/json",
         max_output_tokens=max_tokens,
         temperature=0,
     )
-    resp, model = None, MODEL
+    models = [MODEL] + ([FALLBACK_MODEL] if FALLBACK_MODEL else [])
+    if cheap and FALLBACK_MODEL:
+        models.reverse()                       # easy calls go to the lite model first
+    idx, resp, model = 0, None, models[0]
+
     for attempt in range(retries):
-        model = _model_for(attempt)
+        model = models[idx % len(models)]
         try:
             async with _sem:
                 resp = await asyncio.wait_for(
@@ -39,12 +44,17 @@ async def llm_json(system: str, user: str, *, max_tokens: int = 8192,
             break
         except (errors.APIError, TimeoutError) as e:
             code = getattr(e, "code", "timeout")
-            if code in (429, 500, 503, "timeout") and attempt < retries - 1:
-                wait = 3 * 2 ** attempt
-                print(f"[llm:{tag}] {model} -> {code}, retrying in {wait}s")
-                await asyncio.sleep(wait)
-                continue
-            raise
+            if code not in (429, 500, 503, "timeout") or attempt == retries - 1:
+                raise
+            idx += 1                            # other model has its own quota
+            switched = len(models) > 1
+            if switched and attempt == 0:
+                wait = 1                        # try the other model immediately
+            else:
+                wait = _retry_delay(e) or 3 * 2 ** attempt
+            wait = min(wait, 60)
+            print(f"[llm:{tag}] {model} -> {code}, next {models[idx % len(models)]} in {wait:.0f}s")
+            await asyncio.sleep(wait)
 
     text = resp.text or ""
     log_path = DATA / "logs" / f"{time.time():.3f}_{tag}.json"
