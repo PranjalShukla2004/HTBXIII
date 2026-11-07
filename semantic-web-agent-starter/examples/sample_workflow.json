@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "source_url": "http://localhost:8000/examples/manufacturer_a.html",
+  "steps": [
+    {
+      "action": "fill",
+      "target": {
+        "role": "textbox",
+        "label": "Full Name"
+      },
+      "value": "Alex Example"
+    },
+    {
+      "action": "fill",
+      "target": {
+        "role": "textbox",
+        "label": "Work Email"
+      },
+      "value": "alex@example.test"
+    },
+    {
+      "action": "fill",
+      "target": {
+        "role": "textbox",
+        "label": "Enquiry Details"
+      },
+      "value": "Please send me a catalogue and MOQ information for industrial fasteners."
+    },
+    {
+      "action": "click",
+      "target": {
+        "role": "button",
+        "label": "Send Enquiry"
+      },
+      "requires_approval": true
+    }
+  ],
+  "import_warnings": []
+}

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantic-web-agent"
+version = "0.1.0"
+description = "Browser workflow transfer from Playwright demonstrations using local semantic embeddings"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "playwright>=1.55",
+    "sentence-transformers>=4.1,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[project.scripts]
+swa = "semantic_web_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100

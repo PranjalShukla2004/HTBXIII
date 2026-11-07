@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Acme Industrial — Contact Sales</title>
+<style>body{font-family:system-ui;max-width:600px;margin:3rem auto;padding:1rem}form{display:grid;gap:1rem}label{display:grid;gap:.3rem}input,textarea{padding:.7rem;font:inherit;border:1px solid #aaa;border-radius:6px}button{padding:.8rem;background:#215c43;color:white;border:0;border-radius:6px}h1{font-size:1.5rem}</style></head>
+<body><h1>Acme Industrial</h1><p>Our team can help you choose a product.</p>
+<form aria-label="Contact sales" onsubmit="event.preventDefault(); document.querySelector('#status').textContent='Test enquiry submitted';">
+<label>Contact Person <input type="text" name="contact_person" required></label>
+<label>Business Email Address <input type="email" name="corporate_email" required></label>
+<label>Tell Us What You Need <textarea name="customer_requirements" rows="4" required></textarea></label>
+<button type="submit">Submit Request</button></form><p id="status" role="status"></p></body></html>
