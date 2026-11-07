@@ -48,14 +48,9 @@ export function Rail({ onPicked }: { onPicked?: () => void }) {
   )
 }
 
-export function Logo({ size = 22 }: { size?: number }) {
-  // Two offset frames: the original and its copy.
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden>
-      <rect x="2.5" y="2.5" width="13" height="13" rx="3.5" fill="none" stroke="var(--color-fg-3)" strokeWidth="2" />
-      <rect x="8.5" y="8.5" width="13" height="13" rx="3.5" fill="var(--color-accent)" />
-    </svg>
-  )
+export function Logo({ size = 28 }: { size?: number }) {
+  // The CopyCat cat, winking because the cursor just clicked its eye.
+  return <img src="/favicon.svg" width={size} height={size} alt="" aria-hidden className="shrink-0 select-none" draggable={false} />
 }
 
 function RecordControl() {

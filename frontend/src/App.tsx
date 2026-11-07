@@ -39,7 +39,7 @@ export default function App() {
         <header className="flex h-14 shrink-0 items-center gap-2 px-4 md:px-8">
           <button onClick={() => setDrawer(true)} className="flex h-9 items-center gap-2 rounded px-2 text-[13px] text-fg-2 hover:text-fg lg:hidden">
             <PanelLeft className="size-4" />
-            <Logo size={18} />
+            <Logo size={22} />
           </button>
           {hasMessages && (
             <button onClick={newChat} className="ml-auto flex h-9 items-center gap-2 rounded px-2 text-[13px] text-fg-3 hover:text-fg">
