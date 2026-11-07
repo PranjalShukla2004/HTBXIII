@@ -35,7 +35,7 @@ DESCRIBE_JS = r"""
     };
     if ((tag === 'input' || tag === 'textarea') && el.type !== 'password') d.value = clean(el.value).slice(0, 40);
     if (tag === 'select') {
-      d.text = null;                                   // options list says it all
+      d.text = null;
       d.options = [...el.options].map(o => clean(o.text)).slice(0, 30);
       d.value = clean(el.options[el.selectedIndex]?.text || '');
       if (hiddenSelect) d.hidden = true;
@@ -60,6 +60,7 @@ DESCRIBE_JS = r"""
   };
 
   const popup = [], controls = [], links = [];
+  const taken = new Set();
   for (const el of document.querySelectorAll(SEL)) {
     const isVisible = visible(el);
     // styled shops often hide the real <select> behind a fake button: keep it anyway
@@ -67,6 +68,7 @@ DESCRIBE_JS = r"""
     if (!isVisible && !hiddenSelect) continue;
     const d = info(el, hiddenSelect);
     if (!d) continue;
+    taken.add(el);
     const inPopup = isVisible &&
       (el.matches('[role=option],[role=menuitem],[role=menuitemradio]') || el.closest(POPUP));
     if (inPopup) {
@@ -76,6 +78,25 @@ DESCRIBE_JS = r"""
       (d.tag === 'a' ? links : controls).push([el, d]);
     }
   }
+
+  // size/colour pickers built from plain <li>/<div>s with click handlers (no button/link)
+  const PICKERS = POPUP + ',[class*=size],[class*=Size],[data-qa*=size],[data-testid*=size],[aria-label*=size i]';
+  for (const box of document.querySelectorAll(PICKERS)) {
+    for (const el of box.querySelectorAll('li,div,span,label')) {
+      if (popup.length > 120) break;
+      if (taken.has(el) || (el.parentElement && taken.has(el.parentElement))) continue;
+      if (el.children.length > 3 || el.closest(SEL) || el.querySelector(SEL)) continue;
+      const t = clean(el.innerText);
+      if (!t || t.length > 30 || !visible(el) || getComputedStyle(el).cursor !== 'pointer') continue;
+      const d = info(el, false);
+      if (!d) continue;
+      d.choice = true;
+      d.in_popup = true;
+      taken.add(el);
+      popup.push([el, d]);
+    }
+  }
+
   return popup.concat(controls, links).slice(0, maxEls).map(([el, d], i) => {
     el.setAttribute('data-agent-id', String(i));
     d.id = i;
@@ -112,6 +133,8 @@ def format_elements(els: list[dict]) -> str:
             parts.append("(hidden native dropdown)")
         if d.get("in_popup"):
             parts.append("(in open popup)")
+        if d.get("choice"):
+            parts.append("(clickable choice)")
         for k in ("role", "label", "aria", "ph", "title", "text", "img", "name", "value"):
             if d.get(k):
                 parts.append(f'{k}="{d[k]}"')

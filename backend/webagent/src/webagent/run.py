@@ -50,19 +50,21 @@ Return ONLY JSON:
 Status:
 - ok: performing this action completes the step.
 - partial: this action is needed but the step is not finished yet (e.g. opening a custom
-  dropdown before its option can be chosen, or clicking a search icon that only opens the
-  search box). It must be the LAST action you return.
+  dropdown before its option can be chosen, clicking a search icon that only opens the
+  search box, or clicking add-to-basket to open a size picker). It must be the LAST action.
 - move: the step cannot be done here, but element_id leads to a page where it can
   (e.g. a "Products"/"Shop" link to reach a search box). It must be the LAST action.
 - already_done: the page already satisfies the step (e.g. already on the home page,
   quantity already equals value).
 - not_found: nothing here does the step and nothing obviously leads to it.
-- needs_input: the page requires a choice the shopper has not made and the variables and
-  USER CHOICES don't answer - most often a SIZE, sometimes colour or fit (e.g. a size picker
-  appeared, or "please select a size" is shown). Set "question" (short, addressed to the
-  shopper), "field" (snake_case, e.g. "size") and "options" (the EXACT texts of the choices
-  that are available; skip ones marked unavailable or out of stock). NEVER pick a size
-  yourself. It must be the ONLY action you return.
+- needs_input: the page shows a choice the shopper must make that the variables and
+  USER CHOICES don't answer - most often a SIZE, sometimes colour or fit. Only use this
+  when the choices are actually VISIBLE (a size picker is open, size options are listed,
+  or "please select a size" is shown). If no choices are visible yet, click the
+  add-to-basket button with status "partial" instead: shops often show sizes only after
+  that click. Set "question" (short, addressed to the shopper), "field" (snake_case, e.g.
+  "size") and "options" (the EXACT texts of the available choices; skip ones marked
+  unavailable or out of stock). NEVER pick a size yourself. It must be the ONLY action.
 - needs_human: a CAPTCHA, login wall or age gate blocks progress.
 
 Choose the action from the ELEMENT you found, not from the step's wording:
@@ -77,6 +79,7 @@ Choose the action from the ELEMENT you found, not from the step's wording:
 - custom dropdown with no <select> (a button with haspopup, expanded=false, or text like
   "Quantity: 1") -> "click" it with status "partial". On the next look its choices appear
   marked "(in open popup)": "click" the one matching the value with status "ok".
+- size/colour options marked "(clickable choice)" -> "click" the one matching USER CHOICES
 - quantity shown with +/- buttons -> "click" the + button with repeat = target minus the
   current value; if the current value already equals the target -> already_done
 - no quantity control at all on the product page -> not_found (the step is optional)
@@ -248,6 +251,8 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
     cache = load_cache(program, url)
     performed: dict[int, list[dict]] = {}
     answered_steps: set[int] = set()
+    step_hint: dict[int, str] = {}      # per-step nudges for the model
+    nudges: dict[int, int] = {}
 
     def emit(kind, message, **data):
         if on_event:
@@ -323,7 +328,8 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
 
                 await dismiss_overlays(page)
                 els = await describe_page(page)
-                actions = await ground(page, program, window, vars_, els, answers=answers, hint=hint)
+                actions = await ground(page, program, window, vars_, els, answers=answers,
+                                       hint=" ".join(h for h in (hint, step_hint.get(i, "")) if h))
                 if not actions:
                     actions = [{"step": i, "status": "not_found", "reason": "empty plan"}]
                 start_i, answered_now = i, False
@@ -358,6 +364,23 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         field = re.sub(r"\W+", "_", str(a.get("field") or "choice").lower()).strip("_") or "choice"
                         question = a.get("question") or f"Which {field.replace('_', ' ')} would you like?"
                         options = [str(o) for o in (a.get("options") or [])][:40]
+                        known = answers.get(field)
+                        if nudges.get(i, 0) < 2 and (not options or known):
+                            nudges[i] = nudges.get(i, 0) + 1
+                            if known:
+                                step_hint[i] = (
+                                    f"The shopper already chose {field} = {known}. Click the visible {field} "
+                                    f"option closest to it (marked '(clickable choice)' or in a popup). If no "
+                                    f"{field} options are visible, click the add-to-basket button with status "
+                                    f"partial to open them. Do NOT return needs_input.")
+                            else:
+                                step_hint[i] = (
+                                    "No choices are visible yet, so don't ask the shopper. Click the "
+                                    "add-to-basket button with status partial; if a size is needed, the "
+                                    "shop will show its size options next.")
+                            emit("log", f"not asking about {field} yet; trying the page first", step=i)
+                            answered_now = True
+                            break
                         asks += 1
                         if ask is None or asks > MAX_ASKS:
                             result.status, result.error = "needs_human", question
@@ -372,6 +395,7 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                             return result
                         answers[field] = vars_[field] = answer.strip()
                         answered_steps.add(i)
+                        step_hint.pop(i, None)
                         emit("log", f"shopper chose {field} = {answers[field]}", step=i,
                              answer={field: answers[field]})
                         answered_now = True
@@ -382,6 +406,10 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         emit("status", "needs_human", reason=last_reason)
                         return result
                     if status == "already_done":
+                        qty = _qty_target(steps[i], vars_)
+                        if el is None and qty > 1 and add_step is not None and i < add_step and not repeating:
+                            extra_adds = qty - 1          # "no quantity box" said as already_done
+                            emit("log", f"no quantity control here; will add to basket {qty} times")
                         if steps[i].value is None and not repeating:
                             performed.setdefault(i, [])
                         i, hops = i + 1, 0

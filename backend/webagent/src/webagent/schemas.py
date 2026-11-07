@@ -57,9 +57,9 @@ class AgentEvent(BaseModel):
     data: dict = {}
     t: float = Field(default_factory=time.time)
 
-# ---------- Chat -> run plan ----------
 class RunPlan(BaseModel):
     variables: dict[str, str]
     sites: list[str]
     sheet_url: Optional[str] = None
     summary: str = ""
+    choices: dict[str, str] = {}      # e.g. {"size": "32"}: pre-answered product options

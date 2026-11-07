@@ -1,7 +1,7 @@
 from typing import Callable, Optional
 from urllib.parse import urlparse
 from playwright.async_api import BrowserContext
-from .run import run_program, extract
+from .run import run_program, extract, AskFn
 from .schemas import IntentProgram, RunPlan, SiteResult, AgentEvent
 from .sheet_writer import SheetWriter, SheetError
 
@@ -9,12 +9,18 @@ NEEDED = {"product_name": "the main product's name",
           "price": "the main product's price with currency symbol"}
 
 async def shop_and_log(ctx: BrowserContext, program: IntentProgram, plan: RunPlan, *,
-                       on_event: Optional[Callable[[AgentEvent], None]] = None) -> list[SiteResult]:
+                       on_event: Optional[Callable[[AgentEvent], None]] = None,
+                       ask: Optional[AskFn] = None) -> list[SiteResult]:
+    """ask(field, question, options) -> answer|None. Without it, a size question ends that
+    shop with needs_human. Answers are shared across all shops in this run."""
     def emit(kind, message, site=None, **data):
         if on_event:
             on_event(AgentEvent(kind=kind, site=site, message=message, data=data))
 
     emit("log", f"plan: {plan.summary}", plan=plan.model_dump())
+    answers: dict[str, str] = dict(plan.choices)          # pre-answered from the chat message
+    if answers:
+        emit("log", "choices from your message: " + ", ".join(f"{k}={v}" for k, v in answers.items()))
 
     writer = None
     if plan.sheet_url:
@@ -32,7 +38,8 @@ async def shop_and_log(ctx: BrowserContext, program: IntentProgram, plan: RunPla
     for n, site in enumerate(plan.sites, 1):
         emit("log", f"[{n}/{len(plan.sites)}] shopping on {site}", site=site)
         res = await run_program(ctx, site, program, variables=plan.variables,
-                                page=shop, on_event=on_event, run_tag=str(n))
+                                page=shop, on_event=on_event, run_tag=str(n),
+                                ask=ask, answers=answers)
 
         if res.status == "done":
             missing = {k: d for k, d in NEEDED.items() if not res.outputs.get(k)}
@@ -63,4 +70,6 @@ async def shop_and_log(ctx: BrowserContext, program: IntentProgram, plan: RunPla
 
         emit("done", status, site=site, result=res.model_dump())
         results.append(res)
+
+    await shop.close()
     return results
