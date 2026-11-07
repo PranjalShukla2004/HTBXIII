@@ -42,4 +42,10 @@ class SiteResult(BaseModel):
     screenshot: Optional[str] = None
     error: Optional[str] = None
 
-# ---------- Progress events (streamed to
+# ---------- Progress events (streamed to the frontend later) ----------
+class AgentEvent(BaseModel):
+    kind: Literal["log", "status", "step", "error", "done"]
+    site: Optional[str] = None
+    message: str = ""
+    data: dict = {}
+    t: float = Field(default_factory=time.time)
