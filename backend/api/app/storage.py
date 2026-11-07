@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from webagent.schemas import IntentProgram
@@ -25,9 +26,20 @@ class SkillStore:
             raise ValueError("Skill files must not be symlinks")
         return IntentProgram.model_validate_json(path.read_text())
 
-    @staticmethod
-    def describe(skill_id: str, program: IntentProgram) -> dict:
+    def _metadata(self) -> dict:
+        try:
+            return json.loads((self.data_dir / "skill_metadata.json").read_text())
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def describe(self, skill_id: str, program: IntentProgram) -> dict:
+        metadata = self._metadata().get(skill_id, {})
+        path = self.path(skill_id)
+        created = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat() if path.exists() else None
         return {"id": skill_id, "goal": program.goal,
+                "name": metadata.get("name", skill_id.replace("_", " ").replace("-", " ").title()),
+                "description": metadata.get("description", program.goal),
+                "site": metadata.get("site"), "created_at": created,
                 "arguments": {name: {"type": "string", "default": value}
                               for name, value in program.variables.items()},
                 "steps": [step.model_dump(mode="json") for step in program.steps]}
@@ -44,6 +56,19 @@ class SkillStore:
     def save(self, skill_id: str, program: IntentProgram, *, replace: bool = False):
         path = self.path(skill_id)
         self.atomic_json(path, program.model_dump(mode="json"), replace=replace)
+
+    def update_metadata(self, skill_id: str, **changes):
+        program = self.load(skill_id)
+        metadata = self._metadata()
+        metadata[skill_id] = {**metadata.get(skill_id, {}), **changes}
+        self.atomic_json(self.data_dir / "skill_metadata.json", metadata)
+        return self.describe(skill_id, program)
+
+    def delete(self, skill_id: str):
+        self.path(skill_id).unlink()
+        metadata = self._metadata()
+        metadata.pop(skill_id, None)
+        self.atomic_json(self.data_dir / "skill_metadata.json", metadata)
 
     @staticmethod
     def atomic_json(path: Path, payload: dict, *, replace: bool = True):

@@ -14,7 +14,30 @@ cd /Users/burphh/Desktop/HTB/HTBXIII/backend/api
 RUN_LIVE_GEMINI=1 uv run python -m pytest tests/test_live_gemini.py -o addopts= -vv -s
 ```
 
-It uses your existing `GEMINI_API_KEY` and configured model from the server
+## Frontend browser integration
+
+After `npm ci` in `frontend/`, this separate opt-in test starts the actual Vite
+frontend and FastAPI API on temporary ports, and drives Chromium:
+
+```sh
+RUN_FRONTEND_E2E=1 uv run python -m pytest tests/test_frontend.py -o addopts= -vv -s
+```
+
+It uses a deterministic agent with the real HTTP and WebSocket routes and makes
+no Gemini requests. It checks event rendering, generated text under Logs → debug,
+real reconnect/replay, results, cancellation/New task cleanup, recording
+start/stop/compile/save/delete/discard, API availability/retry, and the mobile rail.
+Temporary skills are isolated from your saved skills. It closes its servers and
+browser on completion. `tests/result/frontend/` contains `completed.png`,
+`mobile.png`, `last-state.png`, `websocket-frames.json`, `page-errors.json`,
+`vite.log`, and `trace.zip`. This folder is overwritten by the next browser run.
+
+The standard suite skips both browser and live Gemini tests. Chromium is installed
+with `uv run python -m playwright install chromium`.
+
+## Live Gemini setup
+
+The live Gemini test uses your existing `GEMINI_API_KEY` and configured model from the server
 environment, `HTBXIII/.env`, or `backend/webagent/.env`. Chromium must be
 installed; run `uv run python -m playwright install chromium` if necessary.
 You do not need a frontend or an already-running API server.

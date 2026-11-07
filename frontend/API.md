@@ -1,113 +1,135 @@
-# Backend API the dashboard expects
+# Frontend integration
 
-The frontend talks to the agent over plain HTTP + Server-Sent Events. Types live in
-`src/api/types.ts`; this file is the same contract in words for whoever builds the
-Python/Node side. Base URL comes from `VITE_API_URL` (default `http://localhost:8000`).
-Enable CORS for `http://localhost:5173`.
+The existing React/Vite dashboard uses Zustand and an `AgentApi` adapter. It has
+one screen, with a responsive Skills rail, recording controls, chat/composer,
+per-site run cards, a results table, and folded logs. There is no router or second
+UI. `src/api/types.ts` describes these view models; `src/api/backend.ts` describes
+the actual Python API. `mapping.ts` translates between them.
 
-Until this exists, the UI runs on `src/api/mock.ts` (`VITE_USE_MOCK=true`).
+Real mode is the default. Set `VITE_USE_MOCK=true` to retain the offline demo.
+`VITE_API_URL` defaults to `http://localhost:8000`; restart Vite after changing it.
+Never put the Gemini key in a `VITE_` variable: it belongs on the backend.
 
-## Skills
+## HTTP commands
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| GET | `/skills` | | `Skill[]` |
-| POST | `/skills` | `SkillDraft` (name filled in by the user) | `Skill` |
-| DELETE | `/skills/{id}` | | 204 |
+| Method | Path | Dashboard use |
+|---|---|---|
+| GET | `/api/skills` | Load the existing skill strips and variable/step details. |
+| GET | `/api/skills/{id}` | Get the selected skill before planning. |
+| POST | `/api/skills/{id}/plans` | Submit `{ "prompt": "Find ps5 at https://…" }`; returns a job. |
+| POST | `/api/skills/{id}/runs` | Submit `{ "url": "https://…", "arguments": { "query": "ps5" } }`; returns a job. |
+| POST | `/api/recordings` | Submit `{ "url": "https://…", "skill_id": "recorded_UNIQUE_ID" }`; returns a job. |
+| POST | `/api/recordings/{id}/stop` | Stop and compile; wait for terminal frames before showing the draft. |
+| PATCH | `/api/skills/{id}` | Save the draft's `{ "name": "…", "description": "…" }`. |
+| DELETE | `/api/skills/{id}` | Delete a saved skill or discard a compiled provisional skill. |
+| POST | `/api/jobs/{id}/cancel` | Stop a run or discard an active recording. |
+| GET | `/api/jobs/{id}` | Recover an oversized terminal result. |
+| GET | `/api/jobs/{id}/logs` | Recover complete terminal text after a replay gap. |
+| GET | `/api/jobs/{id}/screenshot` | Display the final screenshot in the existing site card. |
 
-```jsonc
-// Skill
+Planning and skill metadata/delete HTTP handlers were added because the dashboard's
+existing chat and Save/Delete controls had no matching backend routes. Planning
+calls the existing `webagent.planner.plan_from_chat`; name/description/site metadata
+is stored beside the intents in `skill_metadata.json`. Naming does not rewrite the
+intent program. No `webagent` source or WebSocket protocol changes were required.
+
+Skill selection still works by clicking a strip, typing `@`, or naming the skill.
+The adapter plans each selected skill, displays the returned summary and sites,
+then runs each skill/site in sequence. This respects the backend's single active
+job limit. Arguments come from the actual planner, rather than frontend heuristics.
+
+## WebSocket envelope and UI mapping
+
+Every start returns `job_id`, `streams.events`, `streams.llm`, and `log_url`.
+The client resolves these paths against the API origin, using `ws://` for HTTP and
+`wss://` for HTTPS. Both sockets are read-only; all commands above use HTTP.
+
+```json
 {
-  "id": "sk_ab12",
-  "name": "Supplier quote request",
-  "description": "Fill a supplier's quote form ...",
-  "site": { "url": "http://localhost:5173/northwind", "title": "Northwind Supply" },
-  "createdAt": "2026-11-07T17:00:00Z",
-  "runs": 3,
-  "variables": [{ "name": "qty", "example": "500" }],
-  "steps": [
-    { "id": "s4", "intent": "fill", "description": "Enter the quantity",
-      "action_type": "field.quantity", "slot": "qty", "value": "{{qty}}",
-      "fingerprint": { "role": "spinbutton", "label": "Quantity" } }
-  ]
+  "v": 1,
+  "job_id": "JOB_ID",
+  "channel": "llm",
+  "seq": 3,
+  "type": "llm.delta",
+  "data": { "call_id": "CALL_ID", "attempt": 1, "tag": "ground", "text": "{\"action\":" },
+  "t": 1794060000.0
 }
 ```
 
-`intent` is one of `navigate | fill | click | select | check | chat | wait`. `optional: true` marks steps like cookie banners.
+| Backend event | Existing UI destination |
+|---|---|
+| Planning job result | `RunView` heading, variables and queued site cards. |
+| `recorder` | `Rail` REC bar's readable latest action and action count. |
+| Recording `status: stopping/processing` | Draft strip's “Reading … actions” state. |
+| Recording terminal result's `skill` | Existing draft name/Steps/Save/Discard controls. Closing the backend browser also triggers compilation. |
+| `agent` status/step | Site card opening/running state, active tick and footer description. |
+| `action` | Completed step tick after the action succeeds; partial/navigation/repeated actions stay active until complete. |
+| Run/plan `log` | Existing folded Logs panel, including clicks, cart activity, stdout/stderr, errors and final outcome. Partial text fragments are joined. |
+| Run/plan `llm.start` / `llm.delta` | A progressively updated row per call/attempt under Logs → debug. Generated text is usually JSON; it does not replace the task heading or results. The recording compiler's result instead populates the draft's Steps and variables. |
+| `llm.retry` / `llm.error` | Warning/error in Logs. |
+| `llm.response` | No duplicate display: streamed text is already available, and structured UI uses the final job result. |
+| `completed` / `failed` / `needs_human` / `cancelled` | Terminal site status, existing error treatment, final screenshot and actual extracted outputs in the results table. |
+| `gap` | Recover console text via `log_url` and `X-Log-Sequence`; skip already-recovered log frames. Warn if earlier generated text has expired. |
+| Socket lifecycle | Run header reconnect indicator, recorder reconnect message, and existing error UI if recovery fails. Rail availability reflects skill discovery, with Retry on failure. |
 
-## Recording
+The backend does not report exact/synonym/fuzzy/heal matcher tiers or live video.
+Actual completed steps therefore use a neutral completion tick. While working,
+the card shows its current action and “Browser is running”; afterward it uses the
+final screenshot, when available. Synthetic pages, prices, tiers and approval
+buttons remain confined to explicit mock mode.
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/record/start` | `{ "startUrl": "..." }` | `{ "sessionId": "rec_1" }` — opens the headed Playwright window |
-| GET (SSE) | `/record/{id}/events` | | stream of `RecordedAction` |
-| POST | `/record/{id}/stop` | | `SkillDraft` — runs the intent compiler; `name` may be `""` |
-| POST | `/record/{id}/cancel` | | 204 — close the browser, drop the log |
+## Lifecycle and recovery
 
-```jsonc
-// RecordedAction (one SSE `data:` line each)
-{ "id": "a1", "kind": "change", "summary": "Typed \"500\" into Quantity", "url": "...", "ts": "..." }
-```
-`kind`: `navigate | click | change | submit`. `summary` is shown verbatim in the REC bar, so make it human.
+`websocket.ts` owns socket listeners, a separate cursor for each channel, ordered
+async delivery, deduplication, and bounded exponential reconnect (0.5 seconds up to
+10 seconds, six attempts). Reconnect uses `?after=LAST_DELIVERED_SEQ`; it never starts
+another job. Invalid envelopes and unknown events are ignored. Origin/policy
+rejections fail immediately. Both terminal frames are consumed before moving on,
+so a fast events socket cannot drop late generated text from the LLM socket.
 
-## Runs
+`http.ts` owns composite run/recording sessions and AbortControllers. `store.ts`
+reduces view events into existing components. Terminal outcomes, Stop, New task,
+and app unmount release listeners, timers and sockets. Stop/New task also request
+backend cancellation. Starting a job after its chat was cleared is detected and
+the late job is cancelled. Effects and the API subscriptions have cleanup paths.
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/runs` | `{ "skillIds": ["sk_shop"], "prompt": "I need 5 laptops under £1000" }` | `{ "runId": "run_1" }` |
-| GET (SSE) | `/runs/{id}/events` | | stream of `RunEvent` (send past events again on reconnect) |
-| POST | `/runs/{id}/stop` | | 204, then emit an `error` event "Run stopped" |
+## Limits
 
-`RunEvent` is a tagged union on `type`. Typical order:
+- Recording opens an interactive browser on the backend machine; the website does
+  not provide a remote desktop. Its visible action count counts received events;
+  expired recorder history cannot reconstruct every earlier raw action. The backend
+  still compiles its complete cleaned trace.
+- The backend saves compiled recordings before naming. The adapter hides its own
+  provisional skill until Save and deletes it on Discard. Refreshing during draft
+  review loses this in-memory draft state; the saved skill remains discoverable.
+- Job history and chat sessions are not restored after refresh or server restart.
+  A disconnected browser does not automatically cancel the backend job; use the
+  job cancel endpoint if it remains active.
+- Planning uses the existing shopping-oriented planner and checked-shop list.
+  Extracted columns depend on the selected skill. The adapter executes run jobs;
+  it does not add spreadsheet export or a payment/approval API.
+- `needs_human` is terminal; the current backend has no resume command.
+- Only task output is streamed; independently started CLI/server process output
+  is outside the job's console capture.
 
-```jsonc
-{ "type": "plan", "summary": "Find 5 × laptop under £1000 each across 3 shops",
-  "variables": { "product": "laptop", "qty": "5", "budget": "£1000" },
-  "targets": [{ "id": "t1", "name": "VoltMart", "url": "http://..." }] }
+See [the backend protocol guide](../backend/WEBSOCKETS.md) and
+[test instructions](README.md#testing) for complete setup and validation commands.
 
-{ "type": "target_start", "targetId": "t1", "totalSteps": 7 }
-{ "type": "browser", "targetId": "t1", "status": "opened", "url": "http://..." }
-{ "type": "step", "targetId": "t1", "stepIndex": 0, "description": "Open the shop", "status": "running" }
-{ "type": "step", "targetId": "t1", "stepIndex": 0, "description": "Open the shop", "status": "ok", "tier": "exact" }
-{ "type": "heal", "targetId": "t2", "stepIndex": 5, "message": "Didn't recognise the button, picked \"Get my price\".",
-  "learned": { "action_type": "submit_quote", "phrase": "Get my price" } }
-{ "type": "frame", "targetId": "t1", "image": "data:image/jpeg;base64,..." }   // live mini-window preview
-{ "type": "log", "level": "debug", "message": "aria_snapshot: 31 nodes", "targetId": "t1", "ts": "..." }
-{ "type": "target_done", "targetId": "t1", "status": "ok", "result": { "shop": "VoltMart", "total": "£4,700.00" } }
-{ "type": "browser", "targetId": "t1", "status": "closed", "url": "http://..." }
+## Changed files
 
-{ "type": "done", "summary": "Cheapest option is Parcel & Pixel ...",
-  "table": { "columns": ["Shop", "Total"], "rows": [["VoltMart", "£4,700.00"]], "bestRow": 0 },
-  "needsApproval": "Place the order with Parcel & Pixel" }
-// or
-{ "type": "error", "message": "..." }
-```
+Paths in this table are relative to the repository root.
 
-- `tier` (`exact | synonym | fuzzy | heal`) colours the step bar green / blue / amber / red, matching the scope doc.
-- `step.status` can also be `failed` or `skipped`.
-- `frame` drives the mini browser window for each site. Send a small JPEG every ~300-500 ms, e.g.
-  `base64.b64encode(await page.screenshot(type="jpeg", quality=50, scale="css"))`, or use CDP
-  `Page.startScreencast` for smoother video. Without frames the window shows "Running in its browser window".
-  Sites can run in parallel (one browser context each); the UI shows them side by side.
-- `log` events only show when the user opens "Show logs"; send as many as you like.
-- `needsApproval` is the label of the button the user presses to confirm the final, money-spending action. The agent should never take it on its own.
-
-### Minimal FastAPI SSE example
-
-```python
-from fastapi.responses import StreamingResponse
-import json, asyncio
-
-@app.get("/runs/{run_id}/events")
-async def run_events(run_id: str):
-    async def gen():
-        q = runs[run_id].queue          # asyncio.Queue the agent pushes dicts into
-        for e in runs[run_id].history:  # replay for late subscribers
-            yield f"data: {json.dumps(e)}\n\n"
-        while True:
-            e = await q.get()
-            yield f"data: {json.dumps(e)}\n\n"
-            if e["type"] in ("done", "error"):
-                break
-    return StreamingResponse(gen(), media_type="text/event-stream")
-```
+| Files | Change |
+|---|---|
+| `frontend/src/api/backend.ts`, `mapping.ts`, `websocket.ts` | New wire types, event translation and reusable socket transport. |
+| `frontend/src/api/http.ts`, `types.ts`, `index.ts` | Real API adapter, view events and default real-mode selection. |
+| `frontend/src/api/mock.ts` | Match the recording callback contract, stop its timer during compilation, handle optional run counts. |
+| `frontend/src/store.ts` | Reactive run/recording updates, draft persistence, cancellation and subscription cleanup. |
+| `frontend/src/App.tsx` | App-disposal cleanup. |
+| `frontend/src/components/Chat.tsx`, `Rail.tsx`, `RunView.tsx` | Existing loading/error/recording/run/results/log UI integration. |
+| `frontend/src/lib/ui.ts` | Neutral completed-step tick metadata. |
+| `frontend/.env.example`, `package.json` | Real connection defaults and dependency-free test command. |
+| `frontend/tests/helpers.ts`, `websocket.test.ts`, `mapping.test.ts`, `http.test.ts` | Transport, protocol-to-view and session tests. |
+| `backend/api/app/agent.py`, `jobs.py`, `main.py`, `models.py`, `storage.py` | HTTP planning, skill naming/deletion and recording-site metadata. |
+| `backend/api/tests/test_api.py`, `test_frontend.py` | HTTP adapter checks and opt-in real-browser integration. |
+| `frontend/API.md`, `frontend/README.md`, `backend/WEBSOCKETS.md`, `backend/api/tests/README.md` | Actual protocol, event mapping, setup, tests and limitations. |

@@ -16,6 +16,8 @@ export default function App() {
     void loadSkills()
   }, [loadSkills])
 
+  useEffect(() => () => useStore.getState().dispose(), [])
+
   return (
     <div className="flex h-full">
       <div className="hidden w-[300px] shrink-0 border-r border-rule lg:block">

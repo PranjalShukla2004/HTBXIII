@@ -109,6 +109,17 @@ class JobManager:
         self._schedule(job, self._run(job, program, arguments))
         return job
 
+    def start_plan(self, skill_id, request):
+        program = self.skill(skill_id)
+        job = self._create("plan", skill_id, "")
+        self._schedule(job, self._plan(job, program, request.prompt))
+        return job
+
+    async def _plan(self, job, program, prompt):
+        self._status(job, "planning")
+        plan = await self.backend.plan(prompt, program, on_llm=lambda payload: self._llm(job, payload))
+        return plan.model_dump(mode="json"), "done"
+
     def start_recording(self, request):
         path = self.store.path(request.skill_id)
         if path.exists() and not request.replace:
@@ -148,7 +159,7 @@ class JobManager:
             await self._execute_captured(job, operation)
 
     async def _execute_captured(self, job, operation):
-        timeout = self.run_timeout if job.kind == "run" else self.recording_timeout
+        timeout = self.recording_timeout if job.kind == "recording" else self.run_timeout
         try:
             async with asyncio.timeout(timeout):
                 result, status = await operation
@@ -174,6 +185,7 @@ class JobManager:
             "recording": f"Recording {job.url}. Interact with the browser, then stop the recording.",
             "stopping": "Stopping recording...",
             "processing": "Recording stopped. Creating the skill from the recorded actions...",
+            "planning": f"Planning a run for skill {job.skill_id}",
         }.get(status, status)
         self._log(job, message, source="status")
 
@@ -268,6 +280,7 @@ class JobManager:
         for warning in warnings:
             self._log(job, f"warning: {warning}", source="skill", level="warning")
         self.store.save(job.skill_id, program, replace=replace)
+        self.store.update_metadata(job.skill_id, site={"url": job.url, "title": job.url})
         self._log(job, f"Saved skill {job.skill_id}", source="skill")
         return {"skill": self.store.describe(job.skill_id, program),
                 "warnings": warnings, "event_count": len(trace.events),

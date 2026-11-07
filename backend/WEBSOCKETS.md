@@ -39,6 +39,9 @@ CLI runs using the same directory can still collide with API runs.
 | GET | `/health` | Process health. |
 | GET | `/api/skills` | List saved skills, steps, and argument defaults. |
 | GET | `/api/skills/{skill_id}` | Get one skill. |
+| POST | `/api/skills/{skill_id}/plans` | Plan a chat prompt using the existing planner; returns a job with both streams. |
+| PATCH | `/api/skills/{skill_id}` | Set display name/description without rewriting the intent program. |
+| DELETE | `/api/skills/{skill_id}` | Delete a skill and its display metadata; active skills return 409. |
 | POST | `/api/skills/{skill_id}/runs` | Trigger a skill with a URL and argument overrides. |
 | POST | `/api/recordings` | Start recording a new skill. |
 | POST | `/api/recordings/{job_id}/stop` | Stop recording, save the trace, and generate the skill. |
@@ -148,7 +151,7 @@ curl http://127.0.0.1:8000/api/jobs/JOB_ID
 curl -X POST http://127.0.0.1:8000/api/jobs/JOB_ID/cancel
 ```
 
-Statuses are `queued`, `recording`, `stopping`, `processing`, `running`,
+Statuses are `queued`, `planning`, `recording`, `stopping`, `processing`, `running`,
 `done`, `failed`, `needs_human`, or `cancelled`. A skill's `needs_human`
 result is terminal; the current agent has no pause/resume interface.
 Cancellation waits for worker/browser cleanup. A completed job retains its
@@ -401,6 +404,11 @@ summary are saved under `backend/api/tests/result/TIMESTAMP_RUN_ID/`.
 suite skips this test and makes no model requests.
 
 ## Frontend integration and scope
+
+The React/Vite frontend now uses these two channels in its existing recording,
+chat, site-card and log components. See [the frontend integration guide](../frontend/API.md)
+for its event mapping, HTTP planning/name/delete adapters, recovery behavior and
+limitations. The WebSocket envelope and endpoints are unchanged.
 
 Use the HTTP start response's two `streams` paths with the browser's native
 `WebSocket` API. Use `wss://` when serving over HTTPS, retain a cursor per

@@ -5,6 +5,7 @@ export const TIER_META: Record<Tier | 'skipped', { label: string; color: string;
   synonym: { label: 'Synonym', color: 'var(--color-synonym)', hint: 'Matched through the synonym library' },
   fuzzy: { label: 'Fuzzy', color: 'var(--color-fuzzy)', hint: 'Similar label or nearby text' },
   heal: { label: 'Self-heal', color: 'var(--color-heal)', hint: 'The model looked at the page and picked it' },
+  complete: { label: 'Completed', color: 'var(--color-accent-2)', hint: 'The backend completed this step; no matcher tier was reported' },
   skipped: { label: 'Skipped', color: 'var(--color-rule)', hint: 'Optional step, not needed here' },
 }
 

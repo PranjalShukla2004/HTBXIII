@@ -5,14 +5,14 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import anyio
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import AGENT_ROOT
 from .agent import AgentBackend
 from .jobs import JobManager, ServiceError
-from .models import RecordingRequest, RunRequest
+from .models import PlanRequest, RecordingRequest, RunRequest, SkillUpdate
 from .storage import SkillStore
 
 
@@ -39,7 +39,7 @@ def create_app(*, data_dir=None, state_dir=None, backend=None, run_timeout=600,
     app = FastAPI(title="Webagent API", version="0.1.0", lifespan=lifespan)
     app.state.manager = manager
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
-                       allow_methods=["GET", "POST"], allow_headers=["Content-Type"],
+                       allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Content-Type"],
                        expose_headers=["X-Log-Sequence"])
 
     @app.middleware("http")
@@ -69,6 +69,23 @@ def create_app(*, data_dir=None, state_dir=None, backend=None, run_timeout=600,
     @app.post("/api/skills/{skill_id}/runs", status_code=202)
     async def run_skill(skill_id: str, command: RunRequest):
         return manager.start_run(skill_id, command).snapshot()
+
+    @app.post("/api/skills/{skill_id}/plans", status_code=202)
+    async def plan_skill(skill_id: str, command: PlanRequest):
+        return manager.start_plan(skill_id, command).snapshot()
+
+    @app.patch("/api/skills/{skill_id}")
+    async def update_skill(skill_id: str, command: SkillUpdate):
+        manager.skill(skill_id)
+        return store.update_metadata(skill_id, name=command.name.strip(), description=command.description.strip())
+
+    @app.delete("/api/skills/{skill_id}", status_code=204)
+    async def delete_skill(skill_id: str):
+        manager.skill(skill_id)
+        if manager._active and manager.get(manager._active).skill_id == skill_id:
+            raise ServiceError(409, "skill_busy", "Wait for this skill's active job to finish before deleting it")
+        store.delete(skill_id)
+        return Response(status_code=204)
 
     @app.post("/api/recordings", status_code=202)
     async def record(command: RecordingRequest):

@@ -238,7 +238,7 @@ async function simulateRun(runId: string, skillIds: string[], prompt: string) {
       }
   const totals = results.map((x) => Number(String(x.total).replace(/[^\d.]/g, '')))
   const best = totals.indexOf(Math.min(...totals))
-  skill.runs += 1
+  skill.runs = (skill.runs ?? 0) + 1
   persist(skills)
   emit({
     type: 'done',
@@ -305,12 +305,13 @@ export const mockApi: AgentApi = {
       const next = rec.script[rec.emitted]
       if (!next) return
       rec.emitted += 1
-      cb({ ...next, id: uid(), ts: now(), url: rec.url })
+      cb({ type: 'action', action: { ...next, id: uid(), ts: now(), url: rec.url } })
     }, 1700)
     return () => window.clearInterval(rec.timer)
   },
   async stopRecording(id) {
     const rec = recordings.get(id)
+    if (rec?.timer) window.clearInterval(rec.timer)
     recordings.delete(id)
     await wait(1400) // "compiling intents"
     const base = rec && isShop(rec.url) ? SEED[1] : SEED[0]

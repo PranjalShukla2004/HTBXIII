@@ -11,7 +11,7 @@ from app.main import create_app
 from app.models import RunRequest
 from app.storage import SkillStore
 from app.streams import EventStream
-from webagent.schemas import AgentEvent, IntentProgram, SiteResult, Step, Trace, TraceEvent
+from webagent.schemas import AgentEvent, IntentProgram, RunPlan, SiteResult, Step, Trace, TraceEvent
 
 FINAL = {"completed", "failed", "needs_human", "cancelled"}
 
@@ -50,6 +50,17 @@ class FakeBackend:
             return SiteResult(url=url, status=self.outcome)
         finally:
             self.cleaned.set()
+
+    async def plan(self, prompt, saved, *, on_llm):
+        self.prompt = prompt
+        self.llm(on_llm)
+        if self.fail:
+            raise ValueError("private planner failure")
+        if self.block:
+            self.started.set()
+            await asyncio.Event().wait()
+        return RunPlan(variables={**saved.variables, "query": "ps5"},
+                       sites=["https://shop.example"], summary="Find a PS5")
 
     async def record(self, url, *, on_event, stop):
         self.started.set()
@@ -99,6 +110,70 @@ def test_list_skills_and_defaults_without_loading_llm(make_app):
         assert response["skills"][0]["id"] == "shopping_demo"
         assert response["skills"][0]["arguments"]["query"]["default"] == "shoes"
         assert client.get("/api/skills/missing").status_code == 404
+
+
+def test_chat_planning_uses_existing_job_streams_and_releases_admission(make_app):
+    backend = FakeBackend()
+    with TestClient(make_app(backend)) as client:
+        response = client.post("/api/skills/shopping_demo/plans", json={"prompt": "Find a ps5 at shop.example"})
+        assert response.status_code == 202
+        job = response.json()
+        assert job["kind"] == "plan"
+        events = collect(client, job, "events")
+        llm = collect(client, job, "llm")
+        assert events[-1]["type"] == llm[-1]["type"] == "completed"
+        assert events[-1]["data"]["result"]["variables"] == {"query": "ps5"}
+        assert events[-1]["data"]["result"]["sites"] == ["https://shop.example"]
+        assert any(frame["type"] == "llm.delta" for frame in llm)
+        assert backend.prompt == "Find a ps5 at shop.example"
+        assert not backend.started.is_set()  # Planning does not launch the browser.
+        assert start(client).status_code == 202
+
+
+def test_plan_validation_failure_and_active_job_protection(make_app):
+    backend = FakeBackend(block=True)
+    with TestClient(make_app(backend)) as client:
+        assert client.post("/api/skills/missing/plans", json={"prompt": "hello"}).status_code == 404
+        assert client.post("/api/skills/shopping_demo/plans", json={"prompt": ""}).status_code == 422
+        job = client.post("/api/skills/shopping_demo/plans", json={"prompt": "Find a ps5"}).json()
+        assert backend.started.wait(2)
+        assert start(client).status_code == 409
+        assert client.delete("/api/skills/shopping_demo").status_code == 409
+        client.post(f'/api/jobs/{job["job_id"]}/cancel')
+        assert collect(client, job, "llm")[-1]["type"] == "cancelled"
+
+    with TestClient(make_app(FakeBackend(fail=True))) as client:
+        job = client.post("/api/skills/shopping_demo/plans", json={"prompt": "Find a ps5"}).json()
+        frames = collect(client, job, "events")
+        assert frames[-1]["type"] == "failed"
+        assert "private planner failure" not in json.dumps(frames)
+
+
+def test_skill_names_persist_without_rewriting_the_intent_and_delete_removes_metadata(make_app):
+    app = make_app()
+    original = app.state.manager.store.path("shopping_demo").read_bytes()
+    with TestClient(app) as client:
+        response = client.patch("/api/skills/shopping_demo", json={"name": " My shop ", "description": "A recorded task"})
+        assert response.status_code == 200
+        assert response.json()["name"] == "My shop"
+        assert app.state.manager.store.path("shopping_demo").read_bytes() == original
+        assert client.get("/api/skills").json()["skills"][0]["description"] == "A recorded task"
+        assert client.patch("/api/skills/shopping_demo", json={"name": "   ", "description": ""}).status_code == 422
+        assert client.patch("/api/skills/missing", json={"name": "Shop", "description": ""}).status_code == 404
+        assert client.delete("/api/skills/shopping_demo").status_code == 204
+        assert client.get("/api/skills").json()["skills"] == []
+        assert client.get("/api/skills/shopping_demo").status_code == 404
+        assert app.state.manager.store._metadata() == {}
+
+
+def test_frontend_origin_can_save_and_delete_skills(make_app):
+    with TestClient(make_app()) as client:
+        for method in ("PATCH", "DELETE"):
+            response = client.options("/api/skills/shopping_demo", headers={
+                "Origin": "http://localhost:5173", "Access-Control-Request-Method": method,
+                "Access-Control-Request-Headers": "content-type"})
+            assert response.status_code == 200
+            assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
 def test_run_replays_both_streams_with_isolated_messages(make_app):

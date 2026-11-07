@@ -24,13 +24,14 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
 
   const skill = skills.find((s) => s.id === skillIds[0])
   const kind: 'shop' | 'quote' = skill && /shop|mart|store|cart/i.test(skill.name + skill.site.url) ? 'shop' : 'quote'
-  const done = run.targets.filter((t) => t.status === 'ok' || t.status === 'failed').length
+  const done = run.targets.filter((t) => ['ok', 'failed', 'needs_human', 'stopped'].includes(t.status)).length
+  const reconnecting = Object.values(run.connections ?? {}).includes('reconnecting')
 
   return (
     <section className="animate-slide-in">
       <header className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <h2 className={cx('text-[24px] leading-tight font-semibold tracking-[-0.025em]', !run.plan && 'animate-blink text-fg-3')}>
-          {run.plan ?? 'Planning…'}
+        <h2 className={cx('text-[24px] leading-tight font-semibold tracking-[-0.025em]', !run.plan && live && 'animate-blink text-fg-3')}>
+          {run.plan ?? (live ? 'Planning…' : run.status === 'stopped' ? 'Stopped' : 'Could not start this task')}
         </h2>
         <span className="tabular ml-auto flex items-center gap-3 font-mono text-[12px] text-fg-3">
           {run.targets.length > 0 && (
@@ -39,8 +40,9 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
             </span>
           )}
           {clock((run.finishedAt ?? Date.now()) - run.startedAt)}
+          {live && reconnecting && <span className="text-fuzzy">Reconnecting…</span>}
           {live && (
-            <button onClick={() => void stop(msgId)} className="flex h-7 items-center gap-1.5 rounded-lg px-2 font-sans text-[12px] ring-1 ring-rule-2 hover:text-heal hover:ring-heal/50">
+            <button disabled={run.stopping} onClick={() => void stop(msgId)} className="flex h-7 items-center gap-1.5 rounded-lg px-2 font-sans text-[12px] ring-1 ring-rule-2 hover:text-heal hover:ring-heal/50">
               <Square className="size-2.5 fill-current" /> Stop
             </button>
           )}
@@ -55,7 +57,7 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
         </div>
       )}
 
-      {run.status === 'done' && run.table && (
+      {!live && run.table && (
         <div className="animate-slide-in mt-5">
           <table className="tabular w-full text-[14px]">
             <thead>
@@ -108,7 +110,7 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
         </div>
       )}
 
-      {(run.status === 'failed' || run.status === 'stopped') && (
+      {(run.status === 'failed' || run.status === 'stopped' || run.status === 'needs_human') && (
         <p className="mt-4 flex items-center gap-2 text-[13.5px] text-heal">
           <TriangleAlert className="size-4" /> {run.error ?? 'Stopped.'}
         </p>
@@ -134,12 +136,12 @@ function SiteWindow({ t, index, kind, vars }: { t: TargetState; index: number; k
     return () => ro.disconnect()
   }, [])
 
-  const total = t.totalSteps || 7
+  const total = t.totalSteps || (USE_MOCK ? 7 : 0)
   const scene = Math.min(t.stepIndex, total - 1)
   const tier = t.tiers[scene]
   const ring = tier && tier !== 'skipped' ? TIER_META[tier].color : '#7c6bff'
-  const tone: Tone = t.status === 'queued' ? 'ghost' : t.status === 'failed' ? 'warn' : t.status === 'ok' ? 'chip' : t.learned ? 'warn' : 'sel'
-  const result = t.result ? String(t.result.total ?? Object.values(t.result)[1] ?? '') : ''
+  const tone: Tone = t.status === 'queued' ? 'ghost' : ['failed', 'needs_human', 'stopped'].includes(t.status) ? 'warn' : t.status === 'ok' ? 'chip' : t.learned ? 'warn' : 'sel'
+  const result = t.result ? String(t.result.total ?? t.result.price ?? '') : ''
 
   return (
     <div className={cx('overflow-hidden rounded-xl bg-panel ring-1 ring-rule transition-opacity', t.status === 'queued' && 'opacity-55')}>
@@ -162,13 +164,13 @@ function SiteWindow({ t, index, kind, vars }: { t: TargetState; index: number; k
         {t.status === 'queued' ? (
           <div className="grid h-full place-items-center bg-side text-[12px] text-fg-3">Waiting</div>
         ) : t.frame ? (
-          <img src={t.frame} alt={`Live view of ${t.name}`} className="h-full w-full object-cover object-top" />
+          <img src={t.frame} alt={`${t.frameFinal ? 'Final' : 'Live'} view of ${t.name}`} className="h-full w-full object-cover object-top" />
         ) : USE_MOCK ? (
           <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}>
             <SimPage kind={kind} site={index} name={t.name} scene={scene} ring={ring} vars={vars} done={t.status === 'ok'} />
           </div>
         ) : (
-          <div className="grid h-full place-items-center bg-side px-4 text-center text-[12px] text-fg-3">Running in its browser window</div>
+          <div className="grid h-full place-items-center bg-side px-4 text-center text-[12px] text-fg-3">{t.status === 'running' ? 'Browser is running' : t.status === 'needs_human' ? 'Needs your attention' : t.status === 'failed' ? 'Could not complete this site' : t.status === 'stopped' ? 'Stopped' : 'Run complete'}</div>
         )}
         {t.learned && (
           <span className="animate-slide-in absolute top-2 right-2 max-w-[80%] rounded-md bg-black/80 px-2 py-1 text-[11.5px] font-medium text-fuzzy ring-1 ring-fuzzy/40 backdrop-blur">
@@ -190,13 +192,14 @@ function LogPanel({ run }: { run: RunState }) {
   const [debug, setDebug] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const lines = run.logs.filter((l) => debug || l.level !== 'debug')
+  const lastMessage = lines.at(-1)?.message
   useEffect(() => {
     ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [])
   useEffect(() => {
     const el = ref.current?.lastElementChild
-    if (el) el.scrollTop = el.scrollHeight
-  }, [lines.length])
+    if (el) el.scrollTo({ top: el.scrollHeight })
+  }, [lines.length, lastMessage])
 
   return (
     <div ref={ref} className="mt-1 rounded-xl bg-black/40 ring-1 ring-rule">
@@ -208,7 +211,7 @@ function LogPanel({ run }: { run: RunState }) {
           <div key={l.id} className="flex gap-3">
             <span className="tabular shrink-0 text-fg-3/70">{new Date(l.ts).toLocaleTimeString([], { hour12: false })}</span>
             {l.target && <span className="w-24 shrink-0 truncate text-fg-3">{l.target}</span>}
-            <span className={cx('text-fg-2', l.level === 'warn' && 'text-fuzzy', l.level === 'error' && 'text-heal', l.level === 'debug' && 'text-fg-3')}>
+            <span className={cx('min-w-0 whitespace-pre-wrap break-words text-fg-2', l.level === 'warn' && 'text-fuzzy', l.level === 'error' && 'text-heal', l.level === 'debug' && 'text-fg-3')}>
               {l.message}
             </span>
           </div>

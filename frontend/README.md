@@ -9,28 +9,38 @@ Fonts are bundled through npm (no Google Fonts call), so it works on bad venue W
 ## Run it
 
 ```bash
-npm install
+npm ci
+cp .env.example .env.local
 npm run dev          # http://localhost:5173
 ```
 
-It starts on a **mock backend** (`src/api/mock.ts`) so you can click through every flow
-now. When the agent server is up:
+It connects to the real agent by default. In another terminal, start the backend:
 
 ```bash
-cp .env.example .env.local
-# set VITE_USE_MOCK=false and VITE_API_URL=http://localhost:8000
+cd ../backend/api
+uv sync --locked
+uv run python -m playwright install chromium
+uv run python serve.py
 ```
 
-The contract the backend must implement is in [API.md](./API.md).
-Note: if the mock supplier sites also use Vite on 5173, run this on another port:
-`npm run dev -- --port 5180`.
+The Gemini key stays in the backend environment or project `.env`; see the
+[backend setup](../backend/api/README.md). Existing saved skills appear in the rail.
+Select one and give the task a full shop URL, for example “Find ps5 at
+https://your-test-shop.example”. Use a site you can test.
+
+For the offline demo set `VITE_USE_MOCK=true` in `.env.local` and restart Vite.
+The protocol, event mapping, lifecycle and limitations are in [API.md](./API.md).
+If you use port 5180, add `http://localhost:5180` to the backend's
+`FRONTEND_ORIGINS` environment variable before starting it.
 
 ## Where things are
 
 | File | What |
 |---|---|
-| `src/api/types.ts` | `Skill`, `Step`, `RunEvent` … the shared contract |
-| `src/api/http.ts` | Real client (fetch + EventSource) |
+| `src/api/types.ts` | Existing `Skill`, `Step`, `RunEvent` view models |
+| `src/api/backend.ts`, `mapping.ts` | Backend wire types, validation and mapping into the existing UI |
+| `src/api/http.ts` | Real HTTP commands and composite run/recording sessions |
+| `src/api/websocket.ts` | Native WebSocket subscriptions, cursors, reconnect and cleanup |
 | `src/api/mock.ts` | Fake recorder and parallel runs, with a self-heal moment for the demo |
 | `src/store.ts` | App state and the reducer that turns run events into UI |
 | `src/components/Rail.tsx` | Record control, draft strip after Stop, skill strips |
@@ -43,8 +53,40 @@ Note: if the mock supplier sites also use Vite on 5173, run this on another port
 ## How it works
 
 - Pick a skill: click its strip, type `@`, or name it ("use the shopping skill…").
-- Each site gets a mini browser window in the chat. Step ticks colour by matcher tier
-  (green exact, blue synonym, amber fuzzy, red self-heal). A heal pins a "Learned …" note.
+- Each site gets a mini browser window with live step/footer updates, then its final
+  screenshot. The real backend reports completion; matcher-tier colours and simulated
+  previews remain available in mock mode.
 - Logs stay folded. The tab title shows progress while Playwright windows cover the app.
-- The agent stops before anything that spends money; the run ends with an approval button.
+- Open Logs for terminal output; enable debug to watch generated Gemini text.
+- Results contain actual extracted outputs. A needs-attention outcome uses the existing
+  error treatment; there is no backend resume/payment approval endpoint.
 - Mock-mode pages and prices are synthetic.
+
+## Testing
+
+Use Node 22.18+ (or a newer supported release) for the dependency-free TypeScript
+tests. Vite and the API need not be running for these checks:
+
+```sh
+npm test             # transport, replay, mapping, run/recording sessions
+npm run build       # TypeScript checking and production build
+npm run lint
+```
+
+For a real Chromium UI test over actual FastAPI HTTP/WebSocket connections:
+
+```sh
+cd ../backend/api
+uv sync --locked --group dev
+uv run python -m playwright install chromium
+RUN_FRONTEND_E2E=1 uv run python -m pytest tests/test_frontend.py -o addopts= -vv -s
+```
+
+This starts isolated API/Vite servers, uses a deterministic agent, makes no Gemini
+calls, and tests live actions/text, reconnect/replay, results, Stop/New task cleanup,
+needs-attention, skill discovery retry, recording, save/delete/discard, and the mobile
+rail. It uses temporary skills and stops its servers automatically. Screenshots,
+received frames, page errors and a Playwright trace are saved under
+`backend/api/tests/result/frontend/` (ignored by Git). The ordinary backend test
+suite skips this browser test. See [API test docs](../backend/api/tests/README.md)
+for the separate opt-in test that makes real Gemini calls.

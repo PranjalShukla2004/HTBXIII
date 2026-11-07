@@ -5,7 +5,7 @@ import type { RecordedAction, ResultTable, RunEvent, RunTarget, Skill, SkillDraf
 const uid = () => Math.random().toString(36).slice(2, 10)
 
 export interface TargetState extends RunTarget {
-  status: 'queued' | 'running' | 'ok' | 'failed'
+  status: 'queued' | 'running' | 'ok' | 'failed' | 'needs_human' | 'stopped'
   stepIndex: number
   totalSteps: number
   currentStep?: string
@@ -14,6 +14,7 @@ export interface TargetState extends RunTarget {
   result?: Record<string, string | number>
   /** Latest live preview from the backend (real mode). */
   frame?: string
+  frameFinal?: boolean
   /** Phrase learned by self-heal on this site. */
   learned?: string
 }
@@ -24,11 +25,16 @@ export interface LogLine {
   level: 'debug' | 'info' | 'warn' | 'error'
   message: string
   target?: string
+  targetId?: string
+  jobId?: string
+  source?: string
+  partial?: boolean
+  modelText?: string
 }
 
 export interface RunState {
   runId?: string
-  status: 'starting' | 'planning' | 'running' | 'done' | 'failed' | 'stopped'
+  status: 'starting' | 'planning' | 'running' | 'done' | 'failed' | 'stopped' | 'needs_human'
   startedAt: number
   finishedAt?: number
   plan?: string
@@ -41,6 +47,8 @@ export interface RunState {
   needsApproval?: string
   approved?: boolean
   error?: string
+  stopping?: boolean
+  connections?: Record<string, string>
 }
 
 export type ChatMessage =
@@ -57,11 +65,15 @@ export interface Recording {
   actions: RecordedAction[]
   draft?: SkillDraft
   error?: string
+  connection?: string
+  saving?: boolean
 }
 
 interface Store {
   skills: Skill[]
   skillsLoaded: boolean
+  skillsError?: string
+  agentConnected: boolean
   attached: string[]
   messages: ChatMessage[]
   recording: Recording
@@ -79,6 +91,7 @@ interface Store {
   stopRun(msgId: string): Promise<void>
   approve(msgId: string): void
   newChat(): void
+  dispose(): void
 
   startRecording(url: string): Promise<void>
   stopRecording(): Promise<void>
@@ -87,6 +100,8 @@ interface Store {
 }
 
 let recUnsub: (() => void) | null = null
+let recEpoch = 0
+const runSubscriptions = new Map<string, () => void>()
 
 /** Find skills mentioned in free text, e.g. "use the shopping skill". */
 export function matchSkills(text: string, skills: Skill[]): Skill[] {
@@ -130,7 +145,7 @@ export const useStore = create<Store>((set, get) => {
           return {
             ...t,
             currentStep: e.description,
-            stepIndex: e.status === 'running' ? e.stepIndex : e.stepIndex + 1,
+            stepIndex: Math.max(t.stepIndex, e.status === 'running' ? e.stepIndex : e.stepIndex + 1),
             tiers,
             status: e.status === 'failed' ? 'failed' : t.status,
           }
@@ -141,40 +156,65 @@ export const useStore = create<Store>((set, get) => {
         return patchTarget(next, e.targetId, (t) => ({ ...t, learned: e.learned?.phrase ?? e.message }))
       }
       case 'frame':
-        return patchTarget(r, e.targetId, (t) => ({ ...t, frame: e.image }))
+        return patchTarget(r, e.targetId, (t) => ({ ...t, frame: e.image, frameFinal: e.final }))
       case 'browser':
         return patchTarget(r, e.targetId, (t) => ({ ...t, browserOpen: e.status === 'opened' }))
-      case 'log':
+      case 'connection':
+        return { ...r, connections: { ...r.connections, [`${e.targetId ?? 'plan'}:${e.channel}`]: e.state } }
+      case 'model': {
+        const existing = r.logs.find((line) => line.id === e.id)
+        const text = (e.reset ? '' : existing?.modelText ?? '') + e.text
+        const line: LogLine = { id: e.id, ts: e.ts, level: 'debug', modelText: text,
+          message: `Gemini · ${e.tag}\n${text || 'Waiting for generated text…'}`,
+          targetId: e.targetId, target: r.targets.find((target) => target.id === e.targetId)?.name }
+        return { ...r, logs: existing ? r.logs.map((old) => old.id === e.id ? line : old) : [...r.logs, line] }
+      }
+      case 'logs_snapshot':
+        return { ...r, logs: [...r.logs.filter((line) => !(line.source === 'console' && line.jobId === e.jobId)),
+          { id: uid(), ts: e.ts, level: 'info', message: e.text, source: 'console', jobId: e.jobId, targetId: e.targetId,
+            target: r.targets.find((target) => target.id === e.targetId)?.name }] }
+      case 'log': {
+        if (e.id && r.logs.some((line) => line.id === e.id)) return r
+        const previous = r.logs.at(-1)
+        if (e.source === 'console' && previous?.source === 'console' && previous.partial && previous.jobId === e.jobId) {
+          return { ...r, logs: [...r.logs.slice(0, -1), { ...previous, message: previous.message + e.message,
+            partial: e.partial, level: e.level === 'error' ? 'error' : previous.level }] }
+        }
         return {
           ...r,
           logs: [
             ...r.logs,
             {
-              id: uid(),
+              id: e.id ?? uid(),
               ts: e.ts,
               level: e.level,
               message: e.message,
               target: e.targetId ? r.targets.find((t) => t.id === e.targetId)?.name : undefined,
+              targetId: e.targetId, jobId: e.jobId, source: e.source, partial: e.partial,
             },
           ],
         }
+      }
       case 'target_done':
         return patchTarget(r, e.targetId, (t) => ({
           ...t,
           status: e.status,
           result: e.result,
-          stepIndex: t.totalSteps,
+          stepIndex: e.status === 'ok' ? t.totalSteps : t.stepIndex,
           browserOpen: false,
+          currentStep: e.message ?? (e.status === 'ok' ? 'Finished' : t.currentStep),
         }))
       case 'done':
-        return { ...r, status: 'done', finishedAt: Date.now(), summary: e.summary, table: e.table, needsApproval: e.needsApproval }
+        return { ...r, status: e.status ?? 'done', finishedAt: Date.now(), summary: e.summary, table: e.table,
+          needsApproval: e.needsApproval, error: e.status && e.status !== 'done' ? e.summary : undefined }
       case 'error':
         return {
           ...r,
-          status: r.status === 'stopped' ? 'stopped' : 'failed',
+          status: r.status === 'stopped' || e.stopped ? 'stopped' : 'failed',
           error: e.message,
           finishedAt: Date.now(),
-          targets: r.targets.map((t) => ({ ...t, browserOpen: false })),
+          targets: r.targets.map((t) => ({ ...t, browserOpen: false,
+            ...(['queued', 'running'].includes(t.status) ? { status: e.stopped || r.status === 'stopped' ? 'stopped' as const : 'failed' as const, currentStep: e.message } : {}) })),
         }
     }
   }
@@ -185,22 +225,33 @@ export const useStore = create<Store>((set, get) => {
     set((s) => ({ messages: [...s.messages, { id: msgId, role: 'assistant', kind: 'run', skillIds, run }] }))
     try {
       const { runId } = await api.startRun({ skillIds, prompt })
+      const current = get().messages.find((item) => item.id === msgId)
+      if (!current || current.role !== 'assistant' || current.kind !== 'run' || current.run.status === 'stopped') {
+        await api.stopRun(runId)
+        return
+      }
       patchRun(msgId, (r) => ({ ...r, runId, status: 'planning' }))
+      let finished = false
       const unsub = api.onRunEvents(runId, (e) => {
         patchRun(msgId, (r) => reduce(r, e))
         if (e.type === 'done' || e.type === 'error') {
-          unsub()
+          finished = true
+          runSubscriptions.get(msgId)?.()
+          runSubscriptions.delete(msgId)
           void get().loadSkills()
         }
       })
+      if (finished) unsub()
+      else runSubscriptions.set(msgId, unsub)
     } catch (err) {
-      patchRun(msgId, (r) => ({ ...r, status: 'failed', error: String(err), finishedAt: Date.now() }))
+      patchRun(msgId, (r) => r.status === 'stopped' ? r : ({ ...r, status: 'failed', error: String(err), finishedAt: Date.now() }))
     }
   }
 
   return {
     skills: [],
     skillsLoaded: false,
+    agentConnected: false,
     attached: [],
     messages: [],
     recording: { status: 'idle', url: '', actions: [] },
@@ -210,9 +261,9 @@ export const useStore = create<Store>((set, get) => {
     async loadSkills() {
       try {
         const skills = await api.listSkills()
-        set({ skills, skillsLoaded: true })
-      } catch {
-        set({ skillsLoaded: true })
+        set({ skills, skillsLoaded: true, agentConnected: true, skillsError: undefined })
+      } catch (error) {
+        set({ skillsLoaded: true, agentConnected: false, skillsError: `Couldn’t load skills: ${String(error)}` })
       }
     },
     toggleAttach(id) {
@@ -225,7 +276,7 @@ export const useStore = create<Store>((set, get) => {
       set({ inspectId: id })
     },
     async deleteSkill(id) {
-      await api.deleteSkill(id)
+      try { await api.deleteSkill(id) } catch (error) { set({ skillsError: String(error) }); return }
       set((s) => ({
         skills: s.skills.filter((k) => k.id !== id),
         attached: s.attached.filter((x) => x !== id),
@@ -270,53 +321,88 @@ export const useStore = create<Store>((set, get) => {
     },
     async stopRun(msgId) {
       const msg = get().messages.find((m) => m.id === msgId)
-      if (!msg || msg.role !== 'assistant' || msg.kind !== 'run' || !msg.run.runId) return
-      patchRun(msgId, (r) => ({ ...r, status: 'stopped' }))
-      await api.stopRun(msg.run.runId)
+      if (!msg || msg.role !== 'assistant' || msg.kind !== 'run') return
+      patchRun(msgId, (r) => ({ ...r, status: 'stopped', stopping: true, finishedAt: Date.now(), targets: r.targets.map((target) => ({ ...target, browserOpen: false,
+        ...(['queued', 'running'].includes(target.status) ? { status: 'stopped' as const, currentStep: 'Stopped' } : {}) })) }))
+      try { if (msg.run.runId) await api.stopRun(msg.run.runId) }
+      finally {
+        runSubscriptions.get(msgId)?.()
+        runSubscriptions.delete(msgId)
+        patchRun(msgId, (r) => ({ ...r, stopping: false }))
+      }
     },
     approve(msgId) {
       patchRun(msgId, (r) => ({ ...r, approved: true }))
     },
     newChat() {
+      for (const msg of get().messages) {
+        if (msg.role === 'assistant' && msg.kind === 'run' && msg.run.runId && ['starting', 'planning', 'running'].includes(msg.run.status)) void api.stopRun(msg.run.runId).catch(() => {})
+      }
+      runSubscriptions.forEach((close) => close())
+      runSubscriptions.clear()
       set({ messages: [], attached: [] })
+    },
+    dispose() {
+      for (const msg of get().messages) if (msg.role === 'assistant' && msg.kind === 'run' && ['starting', 'planning', 'running'].includes(msg.run.status)) void get().stopRun(msg.id)
+      runSubscriptions.forEach((close) => close())
+      runSubscriptions.clear()
+      if (get().recording.status !== 'idle') void get().cancelRecording()
     },
 
     async startRecording(url) {
+      const epoch = ++recEpoch
       set({ recording: { status: 'starting', url, actions: [] } })
       try {
         const { sessionId } = await api.startRecording(url)
+        if (epoch !== recEpoch) { await api.cancelRecording(sessionId); return }
         set({ recording: { status: 'recording', url, sessionId, startedAt: Date.now(), actions: [] } })
-        recUnsub = api.onRecordingEvents(sessionId, (a) =>
-          set((s) => ({ recording: { ...s.recording, actions: [...s.recording.actions, a] } })),
-        )
+        recUnsub = api.onRecordingEvents(sessionId, (event) => {
+          if (get().recording.sessionId !== sessionId || epoch !== recEpoch) return
+          if (event.type === 'action') set((s) => ({ recording: { ...s.recording,
+            actions: s.recording.actions.some((action) => action.id === event.action.id) ? s.recording.actions : [...s.recording.actions, event.action] } }))
+          else if (event.type === 'processing') set((s) => ({ recording: { ...s.recording, status: 'compiling' } }))
+          else if (event.type === 'connection') set((s) => ({ recording: { ...s.recording, connection: event.state } }))
+          else if (event.type === 'compiled') {
+            set((s) => ({ recording: { ...s.recording, status: 'review', draft: event.draft } }))
+            recUnsub?.(); recUnsub = null
+          } else if (event.type === 'error') {
+            set((s) => ({ recording: { ...s.recording, status: 'idle', error: event.message } }))
+            recUnsub?.(); recUnsub = null
+          }
+        })
       } catch (err) {
-        set({ recording: { status: 'idle', url, actions: [], error: `Couldn’t start the recorder: ${String(err)}` } })
+        if (epoch === recEpoch) set({ recording: { status: 'idle', url, actions: [], error: `Couldn’t start the recorder: ${String(err)}` } })
       }
     },
     async stopRecording() {
       const rec = get().recording
       if (!rec.sessionId) return
-      recUnsub?.()
-      recUnsub = null
       set({ recording: { ...rec, status: 'compiling' } })
       try {
         const draft = await api.stopRecording(rec.sessionId)
-        set({ recording: { ...get().recording, status: 'review', draft } })
+        if (get().recording.sessionId === rec.sessionId) {
+          set({ recording: { ...get().recording, status: 'review', draft } })
+          recUnsub?.(); recUnsub = null
+        }
       } catch (err) {
-        set({ recording: { ...rec, status: 'idle', error: `Recording failed to compile: ${String(err)}` } })
+        if (get().recording.sessionId === rec.sessionId) set({ recording: { ...rec, status: 'idle', error: `Recording failed to compile: ${String(err)}` } })
       }
     },
     async cancelRecording() {
       const rec = get().recording
+      ++recEpoch
       recUnsub?.()
       recUnsub = null
-      if (rec.sessionId && rec.status === 'recording') await api.cancelRecording(rec.sessionId).catch(() => {})
       set({ recording: { status: 'idle', url: rec.url, actions: [] } })
+      if (rec.sessionId) await api.cancelRecording(rec.sessionId).catch((error) => set((s) => ({ recording: { ...s.recording, error: String(error) } })))
     },
     async saveDraft(name, description) {
       const rec = get().recording
       if (!rec.draft) return
-      const skill = await api.saveSkill({ ...rec.draft, name, description })
+      set((s) => ({ recording: { ...s.recording, saving: true, error: undefined } }))
+      let skill: Skill
+      try { skill = await api.saveSkill({ ...rec.draft, name, description }) }
+      catch (error) { set((s) => ({ recording: { ...s.recording, saving: false, error: String(error) } })); return }
       set((s) => ({
         skills: [skill, ...s.skills.filter((k) => k.id !== skill.id)],
         recording: { status: 'idle', url: rec.url, actions: [] },

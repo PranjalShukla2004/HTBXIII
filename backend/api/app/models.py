@@ -34,3 +34,19 @@ class RunRequest(TargetCommand):
 class RecordingRequest(TargetCommand):
     skill_id: SkillId
     replace: bool = False
+
+
+class PlanRequest(Command):
+    prompt: str = Field(min_length=1, max_length=12000)
+
+
+class SkillUpdate(Command):
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(max_length=4000)
+
+    @field_validator("name")
+    @classmethod
+    def nonempty_name(cls, value):
+        if not value.strip():
+            raise ValueError("A skill name is required")
+        return value.strip()

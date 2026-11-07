@@ -115,6 +115,8 @@ export function Composer() {
   const toggle = useStore((s) => s.toggleAttach)
   const send = useStore((s) => s.send)
   const recording = useStore((s) => s.recording.status !== 'idle')
+  const running = useStore((s) => s.messages.some((m) => m.role === 'assistant' && m.kind === 'run' &&
+    (m.run.stopping || ['starting', 'planning', 'running'].includes(m.run.status))))
   const [text, setText] = useState('')
   const [mention, setMention] = useState<{ q: string; at: number } | null>(null)
   const [hi, setHi] = useState(0)
@@ -156,7 +158,7 @@ export function Composer() {
   }
   const submit = () => {
     const t = text.trim()
-    if (!t || recording) return
+    if (!t || recording || running) return
     if ('Notification' in window && Notification.permission === 'default') void Notification.requestPermission()
     void send(t)
     setText('')
@@ -213,7 +215,7 @@ export function Composer() {
           ref={ta}
           rows={1}
           value={text}
-          disabled={recording}
+          disabled={recording || running}
           onChange={(e) => onChange(e.target.value, e.target.selectionStart)}
           onKeyDown={(e) => {
             if (mention && options.length) {
@@ -227,13 +229,13 @@ export function Composer() {
               submit()
             }
           }}
-          placeholder={recording ? 'Recording…' : chosen.length ? 'What do you need this time?' : 'Pick a skill with @, then say what you need'}
+          placeholder={recording ? 'Recording…' : running ? 'Agent is working…' : chosen.length ? 'What do you need this time?' : 'Pick a skill with @, then say what you need'}
           aria-label="Task"
           className="max-h-[180px] min-h-[40px] flex-1 resize-none bg-transparent px-2 py-2 text-[15px] leading-relaxed outline-none focus-visible:outline-none placeholder:text-fg-3 disabled:opacity-50"
         />
         <button
           onClick={submit}
-          disabled={!text.trim() || recording}
+          disabled={!text.trim() || recording || running}
           className={cx(
             'grid size-10 shrink-0 place-items-center rounded-xl transition',
             'bg-accent text-white hover:bg-accent-2 disabled:bg-chip disabled:text-fg-3',

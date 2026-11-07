@@ -9,6 +9,9 @@ import { Avatar, Field, Strip } from './Strip'
 export function Rail({ onPicked }: { onPicked?: () => void }) {
   const skills = useStore((s) => s.skills)
   const loaded = useStore((s) => s.skillsLoaded)
+  const error = useStore((s) => s.skillsError)
+  const connected = useStore((s) => s.agentConnected)
+  const load = useStore((s) => s.loadSkills)
 
   return (
     <aside className="flex h-full w-full flex-col bg-side">
@@ -26,6 +29,7 @@ export function Rail({ onPicked }: { onPicked?: () => void }) {
       </div>
 
       <div className="flex-1 space-y-2 overflow-y-auto px-3 pb-4">
+        {error && <p role="alert" className="px-1 pt-2 text-[12px] text-heal">{error}</p>}
         {!loaded && [0, 1].map((i) => <div key={i} className="h-11 rounded-lg bg-panel" />)}
         {loaded && skills.length === 0 && (
           <p className="px-1 pt-2 text-[13px] leading-snug text-fg-3">Nothing yet. Record a task and it lands here.</p>
@@ -36,8 +40,9 @@ export function Rail({ onPicked }: { onPicked?: () => void }) {
       </div>
 
       <div className="flex items-center gap-1.5 px-4 py-3 text-[11px] text-fg-3">
-        <span className={cx('size-1.5 rounded-full', USE_MOCK ? 'bg-accent' : 'bg-exact')} />
-        {USE_MOCK ? 'Mock agent' : 'Agent connected'}
+        <span className={cx('size-1.5 rounded-full', USE_MOCK ? 'bg-accent' : connected ? 'bg-exact' : 'bg-fg-3')} />
+        {USE_MOCK ? 'Mock agent' : !loaded ? 'Connecting to agent…' : connected ? 'Agent connected' : 'Agent unavailable'}
+        {!USE_MOCK && loaded && !connected && <button className="ml-auto hover:text-fg" onClick={() => void load()}>Retry</button>}
       </div>
     </aside>
   )
@@ -59,7 +64,7 @@ function RecordControl() {
   const stop = useStore((s) => s.stopRecording)
   const cancel = useStore((s) => s.cancelRecording)
   const [open, setOpen] = useState(false)
-  const [url, setUrl] = useState(rec.url || 'http://localhost:5173/northwind')
+  const [url, setUrl] = useState(rec.url || (USE_MOCK ? 'http://localhost:5173/northwind' : 'https://'))
   const [, tick] = useState(0)
 
   useEffect(() => {
@@ -83,7 +88,7 @@ function RecordControl() {
           </button>
         </div>
         <p key={last?.id} className="animate-slide-in truncate px-3 pt-1 text-[13px] text-fg-2">
-          {rec.status === 'starting' ? 'Opening browser…' : (last?.summary ?? 'Do the task in the browser window')}
+          {rec.status === 'starting' ? 'Opening browser…' : rec.connection === 'reconnecting' ? 'Reconnecting to recorder…' : (last?.summary ?? 'Do the task in the browser window')}
         </p>
         <div className="p-2">
           <button
@@ -169,7 +174,7 @@ function DraftStrip() {
             e.preventDefault()
             if (!name.trim()) return
             await save(name.trim(), draft.description)
-            setName('')
+            if (useStore.getState().recording.status === 'idle') setName('')
           }}
         >
           <Strip tone="chip" className="h-11">
@@ -189,14 +194,15 @@ function DraftStrip() {
             <button type="button" onClick={() => setOpen((o) => !o)} className="flex h-8 items-center gap-1 rounded px-2 text-[12px] text-fg-3 hover:text-fg">
               <ChevronDown className={cx('size-3.5 transition', open && 'rotate-180')} /> Steps
             </button>
-            <button type="button" onClick={() => void cancel()} className="ml-auto h-8 rounded px-2 text-[12px] text-fg-3 hover:text-fg">
+            <button type="button" disabled={rec.saving} onClick={() => void cancel()} className="ml-auto h-8 rounded px-2 text-[12px] text-fg-3 hover:text-fg disabled:opacity-40">
               Discard
             </button>
-            <button type="submit" disabled={!name.trim()} className="h-8 rounded-lg bg-fg px-3 text-[12px] font-semibold text-bg disabled:opacity-40">
-              Save
+            <button type="submit" disabled={!name.trim() || rec.saving} className="h-8 rounded-lg bg-fg px-3 text-[12px] font-semibold text-bg disabled:opacity-40">
+              {rec.saving ? 'Saving…' : 'Save'}
             </button>
           </div>
           {open && <StepList steps={draft.steps} />}
+          {rec.error && <p role="alert" className="mt-2 text-[12px] text-heal">{rec.error}</p>}
         </form>
       )}
     </div>
@@ -246,9 +252,9 @@ function SkillStrip({ skill, onPicked }: { skill: Skill; onPicked?: () => void }
       {open && (
         <div className="animate-slide-in pt-1 pb-2">
           <div className="flex items-center gap-2 px-2 py-1 font-mono text-[11px] text-fg-3">
-            <span className="truncate">{hostOf(skill.site.url)}</span>
+            <span className="truncate">{skill.site.url ? hostOf(skill.site.url) : 'Choose a site in your task'}</span>
             <span className="ml-auto shrink-0">
-              {skill.runs} runs · {timeAgo(skill.createdAt)}
+              {skill.runs !== undefined && `${skill.runs} runs`}{skill.runs !== undefined && skill.createdAt && ' · '}{skill.createdAt && timeAgo(skill.createdAt)}
             </span>
           </div>
           <StepList steps={skill.steps} />

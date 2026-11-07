@@ -3,7 +3,7 @@
 // Full HTTP description lives in API.md.
 
 /** How the matcher found an element on an unseen page. Drives the colour coding. */
-export type Tier = 'exact' | 'synonym' | 'fuzzy' | 'heal'
+export type Tier = 'exact' | 'synonym' | 'fuzzy' | 'heal' | 'complete'
 
 export interface Fingerprint {
   role?: string
@@ -14,7 +14,7 @@ export interface Fingerprint {
   heading?: string
 }
 
-export type StepIntent = 'navigate' | 'fill' | 'click' | 'select' | 'check' | 'chat' | 'wait'
+export type StepIntent = 'navigate' | 'fill' | 'click' | 'select' | 'check' | 'chat' | 'wait' | 'verify' | 'extract'
 
 export interface Step {
   id: string
@@ -46,11 +46,11 @@ export interface Skill {
   steps: Step[]
   variables: SkillVariable[]
   createdAt: string
-  runs: number
+  runs?: number
 }
 
 /** A compiled-but-unsaved skill returned when recording stops. */
-export type SkillDraft = Omit<Skill, 'id' | 'createdAt' | 'runs'>
+export type SkillDraft = Omit<Skill, 'id' | 'createdAt' | 'runs'> & { backendId?: string }
 
 /** One raw action captured live by the recorder. */
 export interface RecordedAction {
@@ -61,6 +61,13 @@ export interface RecordedAction {
   url: string
   ts: string
 }
+
+export type RecordingEvent =
+  | { type: 'action'; action: RecordedAction }
+  | { type: 'processing' }
+  | { type: 'compiled'; draft: SkillDraft }
+  | { type: 'error'; message: string }
+  | { type: 'connection'; state: 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error' }
 
 export interface RunTarget {
   id: string
@@ -89,11 +96,14 @@ export type RunEvent =
   | { type: 'heal'; targetId: string; stepIndex: number; message: string; learned?: { action_type: string; phrase: string } }
   | { type: 'browser'; targetId: string; status: 'opened' | 'closed'; url: string }
   /** Live preview for the mini browser window. JPEG data URL or http URL, ~2-4 fps is plenty. */
-  | { type: 'frame'; targetId: string; image: string; url?: string }
-  | { type: 'log'; level: 'debug' | 'info' | 'warn' | 'error'; message: string; targetId?: string; ts: string }
-  | { type: 'target_done'; targetId: string; status: 'ok' | 'failed'; result?: Record<string, string | number> }
-  | { type: 'done'; summary: string; table?: ResultTable; needsApproval?: string }
-  | { type: 'error'; message: string }
+  | { type: 'frame'; targetId: string; image: string; url?: string; final?: boolean }
+  | { type: 'log'; level: 'debug' | 'info' | 'warn' | 'error'; message: string; targetId?: string; ts: string; id?: string; partial?: boolean; source?: string; jobId?: string }
+  | { type: 'model'; id: string; tag: string; text: string; targetId?: string; ts: string; reset?: boolean }
+  | { type: 'connection'; channel: string; state: 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error'; targetId?: string }
+  | { type: 'logs_snapshot'; targetId?: string; text: string; ts: string; jobId?: string }
+  | { type: 'target_done'; targetId: string; status: 'ok' | 'failed' | 'needs_human'; result?: Record<string, string | number>; message?: string }
+  | { type: 'done'; summary: string; table?: ResultTable; needsApproval?: string; status?: 'done' | 'failed' | 'needs_human' }
+  | { type: 'error'; message: string; stopped?: boolean }
 
 export type Unsubscribe = () => void
 
@@ -103,7 +113,7 @@ export interface AgentApi {
   deleteSkill(id: string): Promise<void>
 
   startRecording(startUrl: string): Promise<{ sessionId: string }>
-  onRecordingEvents(sessionId: string, cb: (a: RecordedAction) => void): Unsubscribe
+  onRecordingEvents(sessionId: string, cb: (event: RecordingEvent) => void): Unsubscribe
   stopRecording(sessionId: string): Promise<SkillDraft>
   cancelRecording(sessionId: string): Promise<void>
 

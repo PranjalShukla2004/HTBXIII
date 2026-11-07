@@ -2,6 +2,13 @@
 
 
 class AgentBackend:
+    async def plan(self, prompt, program, *, on_llm):
+        from webagent.llm import observe_llm
+        from webagent.planner import plan_from_chat
+
+        with observe_llm(on_llm):
+            return await plan_from_chat(prompt, program)
+
     async def record(self, url, *, on_event, stop):
         from webagent.recorder import record
 
