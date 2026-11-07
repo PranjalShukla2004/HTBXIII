@@ -1,9 +1,0 @@
-<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Northstar Components — Enquiry</title>
-<style>body{font-family:system-ui;max-width:600px;margin:3rem auto;padding:1rem}form{display:grid;gap:1rem}label{display:grid;gap:.3rem}input,textarea{padding:.7rem;font:inherit;border:1px solid #aaa;border-radius:6px}button{padding:.8rem;background:#1558b0;color:white;border:0;border-radius:6px}h1{font-size:1.5rem}</style></head>
-<body><h1>Northstar Components</h1><p>Request product information using the form below.</p>
-<form aria-label="Product enquiry" onsubmit="event.preventDefault(); document.querySelector('#status').textContent='Demo enquiry recorded successfully';">
-<label>Full Name <input name="name" autocomplete="name" required></label>
-<label>Work Email <input type="email" name="work_email" required></label>
-<label>Enquiry Details <textarea name="enquiry" rows="4" required></textarea></label>
-<button type="submit">Send Enquiry</button></form><p id="status" role="status"></p></body></html>
