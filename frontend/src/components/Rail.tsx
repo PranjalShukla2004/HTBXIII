@@ -1,0 +1,275 @@
+import { useEffect, useState } from 'react'
+import { Check, ChevronDown, Square, Trash2, X } from 'lucide-react'
+import { useStore } from '../store'
+import type { Skill, Step } from '../api'
+import { USE_MOCK } from '../api'
+import { clock, cx, hostOf, timeAgo } from '../lib/ui'
+import { Avatar, Field, Strip } from './Strip'
+
+export function Rail({ onPicked }: { onPicked?: () => void }) {
+  const skills = useStore((s) => s.skills)
+  const loaded = useStore((s) => s.skillsLoaded)
+
+  return (
+    <aside className="flex h-full w-full flex-col bg-side">
+      <div className="flex h-14 items-center gap-2.5 px-4">
+        <Logo />
+        <span className="text-[16px] font-semibold tracking-[-0.02em]">CopyCat</span>
+      </div>
+
+      <RecordControl />
+      <DraftStrip />
+
+      <div className="flex items-center justify-between px-4 pt-5 pb-2 text-[12px] text-fg-3">
+        <span className="font-medium">Skills</span>
+        <span className="tabular font-mono">{skills.length}</span>
+      </div>
+
+      <div className="flex-1 space-y-2 overflow-y-auto px-3 pb-4">
+        {!loaded && [0, 1].map((i) => <div key={i} className="h-11 rounded-lg bg-panel" />)}
+        {loaded && skills.length === 0 && (
+          <p className="px-1 pt-2 text-[13px] leading-snug text-fg-3">Nothing yet. Record a task and it lands here.</p>
+        )}
+        {skills.map((s) => (
+          <SkillStrip key={s.id} skill={s} onPicked={onPicked} />
+        ))}
+      </div>
+
+      <div className="flex items-center gap-1.5 px-4 py-3 text-[11px] text-fg-3">
+        <span className={cx('size-1.5 rounded-full', USE_MOCK ? 'bg-accent' : 'bg-exact')} />
+        {USE_MOCK ? 'Mock agent' : 'Agent connected'}
+      </div>
+    </aside>
+  )
+}
+
+export function Logo({ size = 22 }: { size?: number }) {
+  // Two offset frames: the original and its copy.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden>
+      <rect x="2.5" y="2.5" width="13" height="13" rx="3.5" fill="none" stroke="var(--color-fg-3)" strokeWidth="2" />
+      <rect x="8.5" y="8.5" width="13" height="13" rx="3.5" fill="var(--color-accent)" />
+    </svg>
+  )
+}
+
+function RecordControl() {
+  const rec = useStore((s) => s.recording)
+  const start = useStore((s) => s.startRecording)
+  const stop = useStore((s) => s.stopRecording)
+  const cancel = useStore((s) => s.cancelRecording)
+  const [open, setOpen] = useState(false)
+  const [url, setUrl] = useState(rec.url || 'http://localhost:5173/northwind')
+  const [, tick] = useState(0)
+
+  useEffect(() => {
+    if (rec.status !== 'recording') return
+    const t = setInterval(() => tick((n) => n + 1), 500)
+    return () => clearInterval(t)
+  }, [rec.status])
+
+  if (rec.status === 'starting' || rec.status === 'recording') {
+    const last = rec.actions[rec.actions.length - 1]
+    return (
+      <div className="mx-3 rounded-xl bg-rec/12 ring-1 ring-rec/40">
+        <div className="flex items-center gap-2 px-3 pt-2.5">
+          <span className="size-2 animate-blink rounded-full bg-rec" />
+          <span className="tabular font-mono text-[12px] text-rec">
+            {rec.status === 'recording' ? clock(Date.now() - (rec.startedAt ?? Date.now())) : '--:--'}
+          </span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-3">{hostOf(rec.url)}</span>
+          <button onClick={() => void cancel()} className="grid size-6 place-items-center rounded text-fg-3 hover:text-fg" aria-label="Discard recording">
+            <X className="size-3.5" />
+          </button>
+        </div>
+        <p key={last?.id} className="animate-slide-in truncate px-3 pt-1 text-[13px] text-fg-2">
+          {rec.status === 'starting' ? 'Opening browser…' : (last?.summary ?? 'Do the task in the browser window')}
+        </p>
+        <div className="p-2">
+          <button
+            onClick={() => void stop()}
+            disabled={rec.status !== 'recording'}
+            className="flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-fg text-[13px] font-semibold text-bg transition hover:bg-white disabled:opacity-40"
+          >
+            <Square className="size-3 fill-rec text-rec" /> Stop · {rec.actions.length} actions
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (rec.status !== 'idle') return null
+
+  return (
+    <div className="mx-3">
+      {!open ? (
+        <button
+          onClick={() => setOpen(true)}
+          className="group flex h-10 w-full items-center gap-2.5 rounded-xl bg-panel px-3 text-[14px] font-medium ring-1 ring-rule transition hover:ring-rule-2"
+        >
+          <span className="size-2.5 rounded-full bg-rec shadow-[0_0_0_3px_rgb(255_91_79/.18)] transition group-hover:shadow-[0_0_0_5px_rgb(255_91_79/.2)]" />
+          Record a skill
+        </button>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (!url.trim()) return
+            setOpen(false)
+            void start(url.trim())
+          }}
+          className="animate-slide-in space-y-2"
+        >
+          <input
+            autoFocus
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}
+            aria-label="Start URL"
+            className="h-10 w-full rounded-xl bg-bg px-3 font-mono text-[12px] ring-1 ring-rule-2 outline-none focus:ring-accent"
+            placeholder="https://"
+          />
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setOpen(false)} className="h-9 rounded-lg px-3 text-[13px] text-fg-3 hover:text-fg">
+              Cancel
+            </button>
+            <button type="submit" className="flex h-9 flex-1 items-center justify-center gap-2 rounded-lg bg-rec text-[13px] font-semibold text-white hover:brightness-110">
+              <span className="size-2 rounded-full bg-white" /> Start
+            </button>
+          </div>
+        </form>
+      )}
+      {rec.error && <p className="mt-2 text-[12px] text-heal">{rec.error}</p>}
+    </div>
+  )
+}
+
+/** After Stop, the recording prints as a new strip that you name. */
+function DraftStrip() {
+  const rec = useStore((s) => s.recording)
+  const save = useStore((s) => s.saveDraft)
+  const cancel = useStore((s) => s.cancelRecording)
+  const [name, setName] = useState('')
+  const [open, setOpen] = useState(false)
+
+  if (rec.status !== 'compiling' && rec.status !== 'review') return null
+  const draft = rec.draft
+
+  return (
+    <div className="mx-3 mt-3 animate-slide-in">
+      {!draft ? (
+        <Strip tone="ghost" className="h-11">
+          <Field className="flex-1 border-rule text-[13px]">
+            <span className="animate-blink">Reading {rec.actions.length} actions…</span>
+          </Field>
+        </Strip>
+      ) : (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault()
+            if (!name.trim()) return
+            await save(name.trim(), draft.description)
+            setName('')
+          }}
+        >
+          <Strip tone="chip" className="h-11">
+            <Field className="flex-1">
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Name this skill"
+                aria-label="Skill name"
+                className="w-full bg-transparent text-[14px] font-semibold outline-none placeholder:font-normal placeholder:text-fg-3"
+              />
+            </Field>
+            <Field className="tabular font-mono text-[11px]">{draft.steps.length}</Field>
+          </Strip>
+          <div className="mt-1.5 flex items-center gap-1">
+            <button type="button" onClick={() => setOpen((o) => !o)} className="flex h-8 items-center gap-1 rounded px-2 text-[12px] text-fg-3 hover:text-fg">
+              <ChevronDown className={cx('size-3.5 transition', open && 'rotate-180')} /> Steps
+            </button>
+            <button type="button" onClick={() => void cancel()} className="ml-auto h-8 rounded px-2 text-[12px] text-fg-3 hover:text-fg">
+              Discard
+            </button>
+            <button type="submit" disabled={!name.trim()} className="h-8 rounded-lg bg-fg px-3 text-[12px] font-semibold text-bg disabled:opacity-40">
+              Save
+            </button>
+          </div>
+          {open && <StepList steps={draft.steps} />}
+        </form>
+      )}
+    </div>
+  )
+}
+
+function SkillStrip({ skill, onPicked }: { skill: Skill; onPicked?: () => void }) {
+  const attached = useStore((s) => s.attached.includes(skill.id))
+  const fresh = useStore((s) => s.justSavedId === skill.id)
+  const toggle = useStore((s) => s.toggleAttach)
+  const del = useStore((s) => s.deleteSkill)
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className={cx(fresh && 'animate-slide-in')}>
+      <div className="flex items-stretch gap-1">
+        <Strip
+          as="button"
+          tone={attached ? 'sel' : 'chip'}
+          className="h-11 flex-1 hover:border-rule-2"
+          aria-pressed={attached}
+          onClick={() => {
+            toggle(skill.id)
+            onPicked?.()
+          }}
+          title={skill.description}
+        >
+          <Field className="pr-0">
+            <Avatar name={skill.name} />
+          </Field>
+          <Field className="flex-1">
+            <span className="truncate text-[14px] font-medium">{skill.name}</span>
+          </Field>
+          <Field className="w-8 justify-center px-0">
+            {attached ? <Check className="size-4 text-accent-2" strokeWidth={2.5} /> : <span className="tabular font-mono text-[11px] text-fg-3">{skill.steps.length}</span>}
+          </Field>
+        </Strip>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          className="grid w-7 place-items-center rounded-lg text-fg-3 hover:bg-panel hover:text-fg"
+          aria-label={`${open ? 'Hide' : 'Show'} steps for ${skill.name}`}
+          aria-expanded={open}
+        >
+          <ChevronDown className={cx('size-3.5 transition', open && 'rotate-180')} />
+        </button>
+      </div>
+      {open && (
+        <div className="animate-slide-in pt-1 pb-2">
+          <div className="flex items-center gap-2 px-2 py-1 font-mono text-[11px] text-fg-3">
+            <span className="truncate">{hostOf(skill.site.url)}</span>
+            <span className="ml-auto shrink-0">
+              {skill.runs} runs · {timeAgo(skill.createdAt)}
+            </span>
+          </div>
+          <StepList steps={skill.steps} />
+          <button onClick={() => void del(skill.id)} className="mt-1 flex h-7 items-center gap-1.5 rounded px-2 text-[12px] text-fg-3 hover:text-heal">
+            <Trash2 className="size-3" /> Delete
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function StepList({ steps }: { steps: Step[] }) {
+  return (
+    <ol className="mt-1 border-l border-rule pl-3">
+      {steps.map((s) => (
+        <li key={s.id} className="flex items-baseline gap-2 py-[3px] text-[12.5px] text-fg-2">
+          <span className="flex-1">{s.description}</span>
+          {s.slot && <span className="font-mono text-[10.5px] text-accent-2">{s.slot}</span>}
+        </li>
+      ))}
+    </ol>
+  )
+}
