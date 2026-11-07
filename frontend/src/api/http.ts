@@ -1,6 +1,6 @@
-import { TERMINAL } from './backend.ts'
+import { isRecord, TERMINAL } from './backend.ts'
 import type { BackendJob, BackendResult, BackendSkill, JobFrame } from './backend.ts'
-import { recordingAction, runEvents, skillFromBackend } from './mapping.ts'
+import { describeError, recordingAction, runEvents, skillFromBackend } from './mapping.ts'
 import { subscribeJob } from './websocket.ts'
 import type { ConnectionState } from './websocket.ts'
 import type { AgentApi, RecordingEvent, RunEvent, Skill, SkillDraft, Unsubscribe } from './types.ts'
@@ -18,9 +18,17 @@ export function createHttpApi(baseUrl: string): AgentApi {
   const recordings = new Map<string, { job: BackendJob; listeners: Set<(event: RecordingEvent) => void>; controller: AbortController; done?: Promise<BackendJob>; draft?: SkillDraft }>()
 
   async function req<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(new URL(path, base), {
-      ...init, headers: { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
-    })
+    let response: Response
+    try {
+      response = await fetch(new URL(path, base), {
+        ...init, headers: { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
+      })
+    } catch (error) {
+      if (isAbort(error)) throw error
+      // CORS/origin rejections and a stopped server both surface as a bare network error.
+      const origin = typeof location === 'undefined' ? 'this page' : location.origin
+      throw new Error(`Can’t reach the agent at ${base}. Check the backend is running and that ${origin} is in its FRONTEND_ORIGINS.`)
+    }
     if (!response.ok) {
       let detail = `${response.status} ${response.statusText}`
       try {
@@ -97,9 +105,11 @@ export function createHttpApi(baseUrl: string): AgentApi {
     return recording.done
   }
 
-  async function followRunJob(job: BackendJob, signal: AbortSignal, skill: Skill, emit: (event: RunEvent) => void, targetId?: string) {
+  async function followRunJob(job: BackendJob, signal: AbortSignal, skill: Skill, emit: (event: RunEvent) => void,
+                              targetId?: string, vars?: Record<string, string>, seen: { lastUrl?: string } = {}) {
     let logCursor = 0
     return monitor(job, signal, async (frame) => {
+      if (frame.type === 'action' && typeof frame.data.url === 'string') seen.lastUrl = frame.data.url
       if (frame.type === 'gap') {
         if (frame.channel === 'events') {
           const response = await fetch(new URL(job.log_url, base), { signal })
@@ -110,7 +120,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
         } else emit({ type: 'log', targetId, level: 'warn', ts: new Date().toISOString(), message: 'Some earlier model detail expired; current job progress is still available.' })
       }
       if (frame.type === 'log' && frame.seq <= logCursor) return
-      for (const event of runEvents(frame, skill, targetId)) emit(event)
+      for (const event of runEvents(frame, skill, targetId, vars)) emit(event)
     }, (channel, state) => emit({ type: 'connection', channel, state, targetId }))
   }
 
@@ -118,7 +128,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
     const session = runs.get(id)!
     const signal = session.controller.signal
     try {
-      const plans: { skill: Skill; variables: Record<string, string>; sites: string[]; summary: string }[] = []
+      const plans: { skill: Skill; variables: Record<string, string>; choices: Record<string, string>; sites: string[]; summary: string }[] = []
       for (const [index, skillId] of session.skillIds.entries()) {
         if (signal.aborted) throw abortError()
         const skill = skillFromBackend(await req<BackendSkill>(`/api/skills/${encodeURIComponent(skillId)}`))
@@ -126,15 +136,21 @@ export function createHttpApi(baseUrl: string): AgentApi {
         session.jobs.add(job.job_id)
         const result = await followRunJob(job, signal, skill, emit)
         if (result.status !== 'done' || !Array.isArray(result.result?.sites)) throw new Error(result.error?.message || 'The agent could not plan this task.')
-        plans.push({ skill, variables: result.result.variables ?? {}, sites: result.result.sites, summary: String(result.result.summary || skill.description) })
+        const choices = result.result.choices
+        plans.push({ skill, variables: result.result.variables ?? {}, sites: result.result.sites, summary: String(result.result.summary || skill.description),
+          choices: isRecord(choices) ? Object.fromEntries(Object.entries(choices).map(([key, value]) => [key, String(value)])) : {} })
       }
-      const targets = plans.flatMap((plan, planIndex) => plan.sites.map((url, index) => ({
-        id: `${id}:${planIndex}:${index}`, url, name: new URL(url).hostname, plan,
-      })))
+      const targets = plans.flatMap((plan, planIndex) => plan.sites.map((url, index) => {
+        let name = url
+        try { name = new URL(url).hostname.replace(/^www\./, '') } catch { /* keep the planner's text */ }
+        return { id: `${id}:${planIndex}:${index}`, url, name, plan }
+      }))
       if (!targets.length) throw new Error('The planner did not choose any sites.')
       emit({ type: 'plan', summary: plans.map((plan) => plan.summary).join(' · '), variables: Object.assign({}, ...plans.map((plan) => plan.variables)),
-        targets: targets.map(({ id, url, name }) => ({ id, url, name })) })
-      const results: { target: typeof targets[number]; job: BackendJob }[] = []
+        choices: Object.assign({}, ...plans.map((plan) => plan.choices)),
+        targets: targets.map(({ id, url, name, plan }) => ({ id, url, name, skillId: plan.skill.id })) })
+      const label = (status: string) => status === 'done' ? 'Done' : status === 'needs_human' ? 'Needs attention' : status === 'cancelled' ? 'Stopped' : 'Failed'
+      const results: { target: typeof targets[number]; job: BackendJob; lastUrl?: string; note: string }[] = []
       for (const target of targets) {
         if (signal.aborted) throw abortError()
         const job = await post<BackendJob>(`/api/skills/${encodeURIComponent(target.plan.skill.id)}/runs`, {
@@ -143,23 +159,34 @@ export function createHttpApi(baseUrl: string): AgentApi {
         session.jobs.add(job.job_id)
         if (signal.aborted) { await cancel(job.job_id); throw abortError() }
         emit({ type: 'target_start', targetId: target.id, totalSteps: target.plan.skill.steps.length })
-        const final = await followRunJob(job, signal, target.plan.skill, emit, target.id)
+        const seen: { lastUrl?: string } = {}
+        const final = await followRunJob(job, signal, target.plan.skill, emit, target.id, target.plan.variables, seen)
         if (final.status === 'cancelled') throw abortError()
         const result = final.result
         const status = final.status === 'done' ? 'ok' : final.status === 'needs_human' ? 'needs_human' : 'failed'
+        // Agent errors live in result.error; service failures such as a timeout in job.error.
+        const detail = result?.error || final.error?.message || ''
+        const note = detail ? describeError(detail) : ''
         if (result?.screenshot) emit({ type: 'frame', targetId: target.id, image: new URL(result.screenshot, base).href, final: true })
         emit({ type: 'target_done', targetId: target.id, status, result: {
-          Site: target.name, Status: status === 'ok' ? 'Done' : status === 'needs_human' ? 'Needs attention' : 'Failed',
+          Site: target.name, Status: label(final.status),
           ...Object.fromEntries(Object.entries(result?.outputs ?? {}).map(([key, value]) => [key, cell(value)])),
-        }, message: result?.error || final.error?.message || undefined })
-        results.push({ target, job: final })
+        }, message: note || undefined, detail: detail || undefined })
+        results.push({ target, job: final, lastUrl: seen.lastUrl, note })
       }
-      const columns = ['Site', 'Status', ...new Set(results.flatMap(({ job }) => Object.keys(job.result?.outputs ?? {})))]
-      const rows = results.map(({ target, job }) => [target.name, job.status === 'done' ? 'Done' : job.status === 'needs_human' ? 'Needs attention' : 'Failed',
-        ...columns.slice(2).map((key) => cell(job.result?.outputs?.[key]))])
-      const outcome = results.some(({ job }) => job.status === 'needs_human') ? 'needs_human' : results.some(({ job }) => job.status !== 'done') ? 'failed' : 'done'
+      // One row per site, with only the columns the backend actually returned.
+      const outputKeys = [...new Set(results.flatMap(({ job }) => Object.keys(job.result?.outputs ?? {})))]
+      const showPage = !outputKeys.includes('product_url') && results.some(({ lastUrl }) => lastUrl)
+      const showNotes = results.some(({ note }) => note)
+      const columns = ['Site', 'Status', ...outputKeys, ...(showPage ? ['Final page'] : []), ...(showNotes ? ['Notes'] : [])]
+      const rows = results.map(({ target, job, lastUrl, note }) => [target.name, label(job.status),
+        ...outputKeys.map((key) => cell(job.result?.outputs?.[key])),
+        ...(showPage ? [lastUrl ?? '—'] : []), ...(showNotes ? [note || '—'] : [])])
+      const completed = results.filter(({ job }) => job.status === 'done').length
+      const outcome = results.some(({ job }) => job.status === 'needs_human') ? 'needs_human' : completed < results.length ? 'failed' : 'done'
       emit({ type: 'done', status: outcome, summary: outcome === 'done' ? `Completed ${results.length} ${results.length === 1 ? 'site' : 'sites'}.` :
-        outcome === 'needs_human' ? 'The agent needs your attention. Check the site details.' : 'Some sites could not be completed. Check the site details and logs.',
+        outcome === 'needs_human' ? `${completed} of ${results.length} sites completed. The agent needs your attention on the rest.` :
+        `${completed} of ${results.length} sites completed. Check the site details and activity.`,
         table: { columns, rows } })
     } catch (error) {
       await Promise.allSettled([...session.jobs].map(cancel))

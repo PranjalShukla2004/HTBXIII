@@ -29,6 +29,8 @@ export interface BackendResult {
   skill?: BackendSkill
   summary?: string
   sites?: string[]
+  /** Plan only: product options the user stated (e.g. size). The run endpoint cannot accept them. */
+  choices?: Record<string, string>
   [key: string]: unknown
 }
 

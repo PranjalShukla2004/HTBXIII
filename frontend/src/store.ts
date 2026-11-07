@@ -1,8 +1,9 @@
 import { create } from 'zustand'
 import { api } from './api'
-import type { RecordedAction, ResultTable, RunEvent, RunTarget, Skill, SkillDraft, Tier } from './api'
+import type { ActivityItem, RecordedAction, ResultTable, RunEvent, RunTarget, Skill, SkillDraft, Tier } from './api'
 
 const uid = () => Math.random().toString(36).slice(2, 10)
+const errText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 export interface TargetState extends RunTarget {
   status: 'queued' | 'running' | 'ok' | 'failed' | 'needs_human' | 'stopped'
@@ -17,6 +18,14 @@ export interface TargetState extends RunTarget {
   frameFinal?: boolean
   /** Phrase learned by self-heal on this site. */
   learned?: string
+  /** Readable agent activity for this site only (each site is tracked independently). */
+  activity: ActivityItem[]
+  /** Page the browser was on after its last completed action. */
+  lastUrl?: string
+  /** The question the agent stopped on, when it needs a person. */
+  attention?: { question: string; options: string[] }
+  /** The backend's original error text, kept for inspection. */
+  detail?: string
 }
 
 export interface LogLine {
@@ -39,6 +48,8 @@ export interface RunState {
   finishedAt?: number
   plan?: string
   variables: Record<string, string>
+  /** Product options the planner read from the message (not sent to runs; see API.md). */
+  choices?: Record<string, string>
   targets: TargetState[]
   logs: LogLine[]
   heals: { target: string; message: string; phrase?: string }[]
@@ -133,8 +144,18 @@ export const useStore = create<Store>((set, get) => {
           status: 'running',
           plan: e.summary,
           variables: e.variables,
-          targets: e.targets.map((t) => ({ ...t, status: 'queued', stepIndex: 0, totalSteps: 0, tiers: [], browserOpen: false })),
+          choices: e.choices,
+          targets: e.targets.map((t) => ({ ...t, status: 'queued', stepIndex: 0, totalSteps: 0, tiers: [], browserOpen: false, activity: [] })),
         }
+      case 'activity':
+        return patchTarget(r, e.targetId, (t) => t.activity.some((item) => item.id === e.item.id) ? t : ({
+          ...t,
+          activity: [...t.activity, e.item].slice(-300),
+          currentStep: e.item.text,
+          lastUrl: e.item.url ?? t.lastUrl,
+        }))
+      case 'attention':
+        return patchTarget(r, e.targetId, (t) => ({ ...t, attention: { question: e.question, options: e.options } }))
       case 'target_start':
         return patchTarget(r, e.targetId, (t) => ({ ...t, status: 'running', totalSteps: e.totalSteps }))
       case 'step':
@@ -202,6 +223,7 @@ export const useStore = create<Store>((set, get) => {
           result: e.result,
           stepIndex: e.status === 'ok' ? t.totalSteps : t.stepIndex,
           browserOpen: false,
+          detail: e.detail,
           currentStep: e.message ?? (e.status === 'ok' ? 'Finished' : t.currentStep),
         }))
       case 'done':
@@ -244,7 +266,7 @@ export const useStore = create<Store>((set, get) => {
       if (finished) unsub()
       else runSubscriptions.set(msgId, unsub)
     } catch (err) {
-      patchRun(msgId, (r) => r.status === 'stopped' ? r : ({ ...r, status: 'failed', error: String(err), finishedAt: Date.now() }))
+      patchRun(msgId, (r) => r.status === 'stopped' ? r : ({ ...r, status: 'failed', error: errText(err), finishedAt: Date.now() }))
     }
   }
 
@@ -263,7 +285,7 @@ export const useStore = create<Store>((set, get) => {
         const skills = await api.listSkills()
         set({ skills, skillsLoaded: true, agentConnected: true, skillsError: undefined })
       } catch (error) {
-        set({ skillsLoaded: true, agentConnected: false, skillsError: `Couldn’t load skills: ${String(error)}` })
+        set({ skillsLoaded: true, agentConnected: false, skillsError: `Couldn’t load skills: ${errText(error)}` })
       }
     },
     toggleAttach(id) {
@@ -276,7 +298,7 @@ export const useStore = create<Store>((set, get) => {
       set({ inspectId: id })
     },
     async deleteSkill(id) {
-      try { await api.deleteSkill(id) } catch (error) { set({ skillsError: String(error) }); return }
+      try { await api.deleteSkill(id) } catch (error) { set({ skillsError: errText(error) }); return }
       set((s) => ({
         skills: s.skills.filter((k) => k.id !== id),
         attached: s.attached.filter((x) => x !== id),
@@ -371,7 +393,7 @@ export const useStore = create<Store>((set, get) => {
           }
         })
       } catch (err) {
-        if (epoch === recEpoch) set({ recording: { status: 'idle', url, actions: [], error: `Couldn’t start the recorder: ${String(err)}` } })
+        if (epoch === recEpoch) set({ recording: { status: 'idle', url, actions: [], error: `Couldn’t start the recorder: ${errText(err)}` } })
       }
     },
     async stopRecording() {
@@ -385,7 +407,7 @@ export const useStore = create<Store>((set, get) => {
           recUnsub?.(); recUnsub = null
         }
       } catch (err) {
-        if (get().recording.sessionId === rec.sessionId) set({ recording: { ...rec, status: 'idle', error: `Recording failed to compile: ${String(err)}` } })
+        if (get().recording.sessionId === rec.sessionId) set({ recording: { ...rec, status: 'idle', error: `Recording failed to compile: ${errText(err)}` } })
       }
     },
     async cancelRecording() {
@@ -394,7 +416,7 @@ export const useStore = create<Store>((set, get) => {
       recUnsub?.()
       recUnsub = null
       set({ recording: { status: 'idle', url: rec.url, actions: [] } })
-      if (rec.sessionId) await api.cancelRecording(rec.sessionId).catch((error) => set((s) => ({ recording: { ...s.recording, error: String(error) } })))
+      if (rec.sessionId) await api.cancelRecording(rec.sessionId).catch((error) => set((s) => ({ recording: { ...s.recording, error: errText(error) } })))
     },
     async saveDraft(name, description) {
       const rec = get().recording
@@ -402,7 +424,7 @@ export const useStore = create<Store>((set, get) => {
       set((s) => ({ recording: { ...s.recording, saving: true, error: undefined } }))
       let skill: Skill
       try { skill = await api.saveSkill({ ...rec.draft, name, description }) }
-      catch (error) { set((s) => ({ recording: { ...s.recording, saving: false, error: String(error) } })); return }
+      catch (error) { set((s) => ({ recording: { ...s.recording, saving: false, error: errText(error) } })); return }
       set((s) => ({
         skills: [skill, ...s.skills.filter((k) => k.id !== skill.id)],
         recording: { status: 'idle', url: rec.url, actions: [] },

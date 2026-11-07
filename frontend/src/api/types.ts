@@ -73,6 +73,8 @@ export interface RunTarget {
   id: string
   name: string
   url: string
+  /** Skill this site runs; its steps label the progress columns. */
+  skillId?: string
 }
 
 export interface ResultTable {
@@ -82,8 +84,21 @@ export interface ResultTable {
   bestRow?: number
 }
 
+/** One readable line of agent activity, derived from an actual backend event. */
+export interface ActivityItem {
+  id: string
+  ts: string
+  /** User-facing description of the event. */
+  text: string
+  /** The backend's own wording, kept for inspection. */
+  raw: string
+  tone: 'info' | 'plan' | 'ok' | 'warn' | 'error'
+  /** Page the browser was on when the action completed, when the backend reports it. */
+  url?: string
+}
+
 export type RunEvent =
-  | { type: 'plan'; summary: string; variables: Record<string, string>; targets: RunTarget[] }
+  | { type: 'plan'; summary: string; variables: Record<string, string>; targets: RunTarget[]; choices?: Record<string, string> }
   | { type: 'target_start'; targetId: string; totalSteps: number }
   | {
       type: 'step'
@@ -101,7 +116,10 @@ export type RunEvent =
   | { type: 'model'; id: string; tag: string; text: string; targetId?: string; ts: string; reset?: boolean }
   | { type: 'connection'; channel: string; state: 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error'; targetId?: string }
   | { type: 'logs_snapshot'; targetId?: string; text: string; ts: string; jobId?: string }
-  | { type: 'target_done'; targetId: string; status: 'ok' | 'failed' | 'needs_human'; result?: Record<string, string | number>; message?: string }
+  | { type: 'activity'; targetId: string; item: ActivityItem }
+  /** The agent stopped on a site with a question (backend has no resume; shown for the user to act on). */
+  | { type: 'attention'; targetId: string; question: string; options: string[] }
+  | { type: 'target_done'; targetId: string; status: 'ok' | 'failed' | 'needs_human'; result?: Record<string, string | number>; message?: string; detail?: string }
   | { type: 'done'; summary: string; table?: ResultTable; needsApproval?: string; status?: 'done' | 'failed' | 'needs_human' }
   | { type: 'error'; message: string; stopped?: boolean }
 

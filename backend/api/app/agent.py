@@ -27,7 +27,8 @@ class AgentBackend:
         from webagent.run import run_program
 
         with observe_llm(on_llm):
-            async with launch(headless=True) as browser:
+            # Follow the project's HEADLESS setting (default 0 = visible Chrome window), like the CLI.
+            async with launch() as browser:
                 return await run_program(browser, url, program, variables=arguments,
                                          on_event=on_event, on_action=on_action)
 
