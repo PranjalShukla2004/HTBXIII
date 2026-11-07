@@ -7,20 +7,20 @@ from .browser import launch
 from .config import DATA
 from .llm import llm_json, stats
 from .page import (describe_page, format_elements, act, act_on, resolve_locator,
-                   settle, page_text, dismiss_overlays)
+                   settle, page_text, dismiss_overlays, click_text, cart_signals)
 from .schemas import IntentProgram, SiteResult, Binding, AgentEvent
 
 MAX_HOPS = 3
 MAX_REPEAT = 20
 MAX_ASKS = 3
-PAGE_CHANGING = {"search", "click", "press"}
+PAGE_CHANGING = {"search", "click", "press", "click_text"}
 CACHE_KEYS = ("tag", "type", "label", "aria", "ph", "name", "text", "href")
 QTY_VAR = re.compile(r"qty|quantit", re.I)
 
 AskFn = Callable[[str, str, list[str]], Awaitable[Optional[str]]]
 
-CART_CHECK = ("The product was just added to the shopping basket/bag: a confirmation message, "
-              "a mini-basket or side panel showing the item, or a basket count above zero is visible. "
+CART_CHECK = ("The product was just added to the shopping basket/bag: a confirmation message or popup, "
+              "a mini-basket/side panel showing the item, or a basket/bag count above zero. "
               "If a size/colour picker is still waiting for a choice, or a message like "
               "'please select a size' is shown, it was NOT added.")
 
@@ -38,7 +38,7 @@ Return ONLY JSON:
   {"step": <the step number exactly as shown in brackets>,
    "status": "ok" | "partial" | "move" | "already_done" | "not_found" | "needs_input" | "needs_human",
    "element_id": integer or null,
-   "action": "fill" | "search" | "select" | "click" | "check" | "press" | null,
+   "action": "fill" | "search" | "select" | "click" | "click_text" | "check" | "press" | null,
    "value": string or null,
    "repeat": integer,
    "question": string or null,
@@ -55,7 +55,7 @@ Status:
 - move: the step cannot be done here, but element_id leads to a page where it can
   (e.g. a "Products"/"Shop" link to reach a search box). It must be the LAST action.
 - already_done: the page already satisfies the step (e.g. already on the home page,
-  quantity already equals value).
+  quantity already equals value, the basket already shows the item).
 - not_found: nothing here does the step and nothing obviously leads to it.
 - needs_input: the page shows a choice the shopper must make that the variables and
   USER CHOICES don't answer - most often a SIZE, sometimes colour or fit. Only use this
@@ -64,8 +64,8 @@ Status:
   add-to-basket button with status "partial" instead: shops often show sizes only after
   that click. Set "question" (short, addressed to the shopper), "field" (snake_case, e.g.
   "size") and "options" (the EXACT texts of the available choices; skip ones marked
-  unavailable or out of stock). NEVER pick a size yourself. It must be the ONLY action.
-- needs_human: a CAPTCHA, login wall or age gate blocks progress.
+  unavailable, disabled or out of stock). NEVER pick a size yourself. It must be the ONLY action.
+- needs_human: a CAPTCHA, login wall, "Access Denied" page or age gate blocks progress.
 
 Choose the action from the ELEMENT you found, not from the step's wording:
 - text or number input -> "fill"; the shop's search box -> "search" (types and presses Enter)
@@ -79,7 +79,12 @@ Choose the action from the ELEMENT you found, not from the step's wording:
 - custom dropdown with no <select> (a button with haspopup, expanded=false, or text like
   "Quantity: 1") -> "click" it with status "partial". On the next look its choices appear
   marked "(in open popup)": "click" the one matching the value with status "ok".
-- size/colour options marked "(clickable choice)" -> "click" the one matching USER CHOICES
+- size options marked "(in size picker)" or "(clickable choice)" -> "click" the one matching
+  USER CHOICES. Ignore ones marked "(disabled)".
+- if the option you need is visible in the page but NOT in the element list, use
+  "click_text" with element_id null and value = its exact visible text (e.g. "10")
+- once you have clicked add-to-basket and a size picker is open, do NOT click add-to-basket
+  again: choose the size (click / click_text), or return needs_input with the options
 - quantity shown with +/- buttons -> "click" the + button with repeat = target minus the
   current value; if the current value already equals the target -> already_done
 - no quantity control at all on the product page -> not_found (the step is optional)
@@ -129,8 +134,8 @@ def slug(url: str) -> str:
 def forbidden(el: dict) -> bool:
     return bool(FORBIDDEN.search(" ".join(str(el.get(k, "")) for k in ("text", "aria", "title", "href"))))
 
-def semantic(el: dict) -> dict:
-    return {k: el[k] for k in CACHE_KEYS if el.get(k)}
+def semantic(el: Optional[dict]) -> dict:
+    return {k: el[k] for k in CACHE_KEYS if el.get(k)} if el else {}
 
 def _step_index(a: dict, default: int) -> int:
     try:
@@ -164,11 +169,18 @@ def cacheable(step, acts: list[dict]) -> bool:
     """Replayable only if the step doesn't depend on the item or on a user's answer."""
     return ("{{" not in step.target
             and not any(a["action"] == "click" and a.get("repeat", 1) > 1 for a in acts)
-            and not any(a.get("answer") for a in acts))
+            and not any(a.get("answer") or not a.get("locator") for a in acts))
 
 async def replay_step(page: Page, acts: list[dict], value: Optional[str], *,
                       on_action: Optional[Callable[[dict], None]] = None) -> bool:
     for a in acts:
+        if a["action"] == "click_text":
+            try:
+                await click_text(page, a.get("value") or "")
+            except Exception:
+                return False
+            await settle(page)
+            continue
         loc = await resolve_locator(page, a["locator"])
         if loc is None:
             return False
@@ -218,6 +230,17 @@ async def verify(page: Page, condition: str, limit: int = 4000) -> dict:
     return await llm_json(VERIFY_SYSTEM, f"CONDITION: {condition}\n\nPAGE TEXT:\n{text}",
                           tag="verify", cheap=True)
 
+async def verify_cart(page: Page) -> dict:
+    """Basket check: popups/toasts/basket icons first, then the page text."""
+    await page.wait_for_timeout(1500)             # "added" popups often animate in late
+    signals = await cart_signals(page)
+    text = await page_text(page, limit=5000)
+    user = (f"CONDITION: {CART_CHECK}\n\n"
+            "BASKET SIGNALS (popups, notifications, basket/bag icons):\n"
+            + ("\n".join(f"- {s}" for s in signals) or "- (none found)")
+            + f"\n\nPAGE TEXT:\n{text}")
+    return await llm_json(VERIFY_SYSTEM, user, tag="verify_cart", cheap=True)
+
 async def extract(page: Page, fields: dict[str, str]) -> dict:
     text = await page_text(page, limit=5000)
     links = await page.evaluate(LINKS_JS)
@@ -246,17 +269,27 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
     final_verify = verify_idx[-1] if verify_idx else None
     action_idx = [k for k, s in enumerate(steps) if s.op not in ("verify", "extract")]
     add_step = action_idx[-1] if action_idx else None
-    check_after_add = add_step is not None and (final_verify is None or final_verify < add_step)
     result = SiteResult(url=url, status="navigating", variables=vars_)
     cache = load_cache(program, url)
     performed: dict[int, list[dict]] = {}
     answered_steps: set[int] = set()
     step_hint: dict[int, str] = {}      # per-step nudges for the model
     nudges: dict[int, int] = {}
+    last_partial: dict[int, str] = {}
+    guards: dict[int, int] = {}
 
     def emit(kind, message, **data):
         if on_event:
             on_event(AgentEvent(kind=kind, site=url, message=message, data=data))
+
+    def nudge(i: int, text: str, log: str) -> bool:
+        """Re-plan step i with a hint instead of failing. False once used up."""
+        if nudges.get(i, 0) >= 2:
+            return False
+        nudges[i] = nudges.get(i, 0) + 1
+        step_hint[i] = text
+        emit("log", log, step=i)
+        return True
 
     own_page = page is None
     if own_page:
@@ -291,8 +324,9 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                     continue
 
                 if step.op == "verify":
-                    if i != final_verify:
-                        emit("log", f"skipped intermediate verify {i}")
+                    # the basket check after adding replaces the skill's own verify steps
+                    if add_step is not None or i != final_verify:
+                        emit("log", f"skipped verify {i} (basket check covers it)")
                         i += 1
                         continue
                     target = render(step.target, vars_)
@@ -332,7 +366,7 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                                        hint=" ".join(h for h in (hint, step_hint.get(i, "")) if h))
                 if not actions:
                     actions = [{"step": i, "status": "not_found", "reason": "empty plan"}]
-                start_i, answered_now = i, False
+                start_i, replan = i, False
 
                 for n, a in enumerate(actions):
                     s = _step_index(a, i)
@@ -350,36 +384,49 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                             action = "search"                   # typing into search = submit it too
                         if status == "ok" and action not in ("search", "press"):
                             status = "partial"                  # icon click only opened the box
+                    text_click = action == "click_text" and bool(a.get("value"))
                     repeat = max(1, min(int(a.get("repeat") or 1), MAX_REPEAT))
                     last_reason = a.get("reason", "")
                     emit("step", f"[{i}] {action}{f' x{repeat}' if repeat > 1 else ''} "
-                                 f"-> {status} [{eid}] {last_reason}", step=i)
+                                 f"-> {status} [{eid if not text_click else repr(value)}] {last_reason}",
+                         step=i)
 
-                    if status in ("ok", "partial", "move") and el is None:
+                    if status in ("ok", "partial", "move") and el is None and not text_click:
                         status = "not_found"
                     if el is not None and forbidden(el):
                         raise StepFailed(f"refused forbidden element: {el.get('text') or el.get('href')}")
+                    if text_click and FORBIDDEN.search(value or ""):
+                        raise StepFailed(f"refused forbidden text: {value}")
+
+                    # ---- don't click the same 'partial' thing twice (e.g. ADD again) ----
+                    if status == "partial" and el is not None:
+                        key = json.dumps(semantic(el), sort_keys=True)
+                        if last_partial.get(i) == key and guards.get(i, 0) < 2:
+                            guards[i] = guards.get(i, 0) + 1
+                            step_hint[i] = ("You just clicked that and it opened a picker. Do NOT click it "
+                                            "again: choose the matching option (click, or click_text with its "
+                                            "visible text), or return needs_input with the options you see.")
+                            emit("log", "not clicking the same thing again; the picker should be open", step=i)
+                            replan = True
+                            break
+                        last_partial[i] = key
 
                     if status == "needs_input":
                         field = re.sub(r"\W+", "_", str(a.get("field") or "choice").lower()).strip("_") or "choice"
                         question = a.get("question") or f"Which {field.replace('_', ' ')} would you like?"
                         options = [str(o) for o in (a.get("options") or [])][:40]
                         known = answers.get(field)
-                        if nudges.get(i, 0) < 2 and (not options or known):
-                            nudges[i] = nudges.get(i, 0) + 1
-                            if known:
-                                step_hint[i] = (
-                                    f"The shopper already chose {field} = {known}. Click the visible {field} "
-                                    f"option closest to it (marked '(clickable choice)' or in a popup). If no "
-                                    f"{field} options are visible, click the add-to-basket button with status "
-                                    f"partial to open them. Do NOT return needs_input.")
-                            else:
-                                step_hint[i] = (
-                                    "No choices are visible yet, so don't ask the shopper. Click the "
-                                    "add-to-basket button with status partial; if a size is needed, the "
-                                    "shop will show its size options next.")
-                            emit("log", f"not asking about {field} yet; trying the page first", step=i)
-                            answered_now = True
+                        if (not options or known) and nudge(
+                                i,
+                                (f"The shopper already chose {field} = {known}. Click the visible {field} "
+                                 f"option closest to it (click, or click_text with its visible text). If no "
+                                 f"{field} options are visible, click the add-to-basket button with status "
+                                 f"partial to open them. Do NOT return needs_input.") if known else
+                                ("No choices are visible yet, so don't ask the shopper. Click the "
+                                 "add-to-basket button with status partial; if a size is needed, the "
+                                 "shop will show its size options next."),
+                                f"not asking about {field} yet; trying the page first"):
+                            replan = True
                             break
                         asks += 1
                         if ask is None or asks > MAX_ASKS:
@@ -398,7 +445,7 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         step_hint.pop(i, None)
                         emit("log", f"shopper chose {field} = {answers[field]}", step=i,
                              answer={field: answers[field]})
-                        answered_now = True
+                        replan = True
                         break                                   # re-plan this step with the answer
 
                     if status == "needs_human":
@@ -415,6 +462,15 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         i, hops = i + 1, 0
                         continue
                     if status not in ("ok", "partial", "move"):
+                        if i == add_step and nudge(
+                                i,
+                                "If a size or other option has to be chosen first: click the visible option "
+                                "matching USER CHOICES (click, or click_text with its visible text), or click "
+                                "add-to-basket with status partial to reveal the options, or return "
+                                "needs_input with the options you can see.",
+                                "add to basket not possible yet; looking for a required option"):
+                            replan = True
+                            break
                         if steps[i].optional:
                             qty = _qty_target(steps[i], vars_)
                             if qty > 1 and add_step is not None and i < add_step and not repeating:
@@ -426,15 +482,28 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         raise StepFailed(f"step {i} ({steps[i].op} '{render(steps[i].target, vars_)}'): "
                                          f"{status} - {last_reason}")
 
-                    for repetition in range(repeat):
-                        await act(page, el, action, value)
-                        if on_action:
-                            on_action({"step": i, "op": action, "target": render(steps[i].target, vars_),
-                                       "value": value, "element": el, "url": page.url,
-                                       "cached": False, "repeat": repeat, "repetition": repetition + 1,
-                                       "navigation_hop": status == "move", "partial": status == "partial"})
-                        if repeat > 1:
-                            await page.wait_for_timeout(250)
+                    try:
+                        for repetition in range(repeat):
+                            if text_click:
+                                await click_text(page, value)
+                            else:
+                                await act(page, el, action, value)
+                            if on_action:
+                                on_action({"step": i, "op": action,
+                                           "target": render(steps[i].target, vars_),
+                                           "value": value, "element": el or {"text": value},
+                                           "url": page.url, "cached": False, "repeat": repeat,
+                                           "repetition": repetition + 1,
+                                           "navigation_hop": status == "move",
+                                           "partial": status == "partial"})
+                            if repeat > 1:
+                                await page.wait_for_timeout(250)
+                    except Exception as e:
+                        if not text_click:
+                            raise
+                        emit("log", f"couldn't click text {value!r}: {e}", step=i)
+                        hops += 1
+                        break
                     await settle(page)
                     if not repeating:
                         rec = {"action": action, "locator": semantic(el), "value": value,
@@ -453,23 +522,24 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         hops += 1
                         break
 
-                if i == start_i and not answered_now:
+                if i == start_i and not replan:
                     hops += 1
                 if hops > MAX_HOPS:
                     raise StepFailed(f"step {i} made no progress after {MAX_HOPS} attempts ({last_reason})")
 
             # ---- after the steps: did it really go into the basket? ----
             hint = ""
-            if check_after_add and not cart_checked:
-                v = await verify(page, CART_CHECK, limit=6000)
+            if add_step is not None and not cart_checked:
+                v = await verify_cart(page)
                 passed = bool(v.get("passed"))
                 emit("step", f"basket check: {passed} ({v.get('evidence')})", step=add_step, passed=passed)
                 if not passed:
                     if cart_retries >= 2:
                         raise StepFailed(f"item was not added to the basket ({v.get('evidence')})")
                     cart_retries += 1
-                    hint = ("The last attempt did NOT add the item to the basket. Look for a required "
-                            "choice (size, colour, fit) or an error message, then add it to the basket.")
+                    hint = ("The basket check did not see the item. If the basket/bag already shows it "
+                            "(count went up, or an 'added' message), return already_done. Otherwise look "
+                            "for a required choice (size, colour, fit) or an error message, then add it.")
                     i, hops = add_step, 0
                     continue
                 cart_checked = True

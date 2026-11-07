@@ -1,6 +1,9 @@
 import json, re
 from playwright.async_api import Page, Locator
 
+POPUP_SCOPE = '[role=listbox],[role=menu],[role=dialog],[aria-modal=true],[class*=popover]'
+PICKER_SCOPE = '[class*=size],[class*=Size],[data-qa*=size],[data-testid*=size],[aria-label*=size i]'
+
 DESCRIBE_JS = r"""
 (maxEls) => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -10,6 +13,7 @@ DESCRIBE_JS = r"""
               '[role=button],[role=link],[role=option],[role=radio],[role=tab],[role=combobox],' +
               '[role=searchbox],[role=spinbutton],[role=menuitem],[role=menuitemradio],[aria-haspopup]';
   const POPUP = '[role=listbox],[role=menu],[role=dialog],[aria-modal=true],[class*=popover]';
+  const PICKER = '[class*=size],[class*=Size],[data-qa*=size],[data-testid*=size],[aria-label*=size i]';
   const visible = el => {
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return false;
@@ -44,6 +48,7 @@ DESCRIBE_JS = r"""
     if (pop && pop !== 'false') d.popup = pop;
     const exp = el.getAttribute('aria-expanded');
     if (exp) d.expanded = exp;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') d.disabled = true;
     if (tag === 'a' || tag === 'button' || el.matches('[onclick],[role=button]')) {
       const card = el.closest('[class*=product],[class*=card],[class*=item],article,li');
       const ctx = card ? clean(card.innerText).slice(0, 120) : '';
@@ -59,7 +64,7 @@ DESCRIBE_JS = r"""
     return d;
   };
 
-  const popup = [], controls = [], links = [];
+  const front = [], controls = [], links = [];
   const taken = new Set();
   for (const el of document.querySelectorAll(SEL)) {
     const isVisible = visible(el);
@@ -70,20 +75,18 @@ DESCRIBE_JS = r"""
     if (!d) continue;
     taken.add(el);
     const inPopup = isVisible &&
-      (el.matches('[role=option],[role=menuitem],[role=menuitemradio]') || el.closest(POPUP));
-    if (inPopup) {
-      d.in_popup = true;
-      popup.push([el, d]);                             // open dropdown options go first
-    } else {
-      (d.tag === 'a' ? links : controls).push([el, d]);
-    }
+      (el.matches('[role=option],[role=menuitem],[role=menuitemradio]') || !!el.closest(POPUP));
+    const inPicker = isVisible && !!el.closest(PICKER);
+    if (inPopup) d.in_popup = true;
+    if (inPicker) d.picker = true;
+    if (inPopup || inPicker) front.push([el, d]);      // open dropdowns and size pickers go first
+    else (d.tag === 'a' ? links : controls).push([el, d]);
   }
 
-  // size/colour pickers built from plain <li>/<div>s with click handlers (no button/link)
-  const PICKERS = POPUP + ',[class*=size],[class*=Size],[data-qa*=size],[data-testid*=size],[aria-label*=size i]';
-  for (const box of document.querySelectorAll(PICKERS)) {
+  // size/colour choices built from plain <li>/<div>s with click handlers (no button/link)
+  for (const box of document.querySelectorAll(POPUP + ',' + PICKER)) {
     for (const el of box.querySelectorAll('li,div,span,label')) {
-      if (popup.length > 120) break;
+      if (front.length > 120) break;
       if (taken.has(el) || (el.parentElement && taken.has(el.parentElement))) continue;
       if (el.children.length > 3 || el.closest(SEL) || el.querySelector(SEL)) continue;
       const t = clean(el.innerText);
@@ -91,17 +94,37 @@ DESCRIBE_JS = r"""
       const d = info(el, false);
       if (!d) continue;
       d.choice = true;
-      d.in_popup = true;
+      d.picker = true;
       taken.add(el);
-      popup.push([el, d]);
+      front.push([el, d]);
     }
   }
 
-  return popup.concat(controls, links).slice(0, maxEls).map(([el, d], i) => {
+  return front.concat(controls, links).slice(0, maxEls).map(([el, d], i) => {
     el.setAttribute('data-agent-id', String(i));
     d.id = i;
     return d;
   });
+}
+"""
+
+CART_SIGNALS_JS = r"""
+() => {
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const out = [];
+  document.querySelectorAll('[role=dialog],[role=alert],[role=status],[aria-live],[class*=minicart],' +
+      '[class*=mini-cart],[class*=minibag],[class*=mini-bag],[class*=toast],[class*=notification],' +
+      '[class*=added],[class*=Added]').forEach(el => {
+    if (!vis(el)) return;
+    const t = clean(el.innerText).slice(0, 300);
+    if (t) out.push(t);
+  });
+  document.querySelectorAll('a,button,[aria-label]').forEach(el => {
+    const lab = clean((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || ''));
+    if (lab.length < 80 && /\b(bag|basket|cart|trolley)\b/i.test(lab) && vis(el)) out.push(lab);
+  });
+  return [...new Set(out)].slice(0, 25);
 }
 """
 
@@ -124,6 +147,12 @@ CLOSE_SEL = ('[aria-label="Close" i], [aria-label="Dismiss" i], [aria-label="clo
 async def describe_page(page: Page, max_elements: int = 200) -> list[dict]:
     return await page.evaluate(DESCRIBE_JS, max_elements)
 
+async def cart_signals(page: Page) -> list[str]:
+    try:
+        return await page.evaluate(CART_SIGNALS_JS)
+    except Exception:
+        return []
+
 def format_elements(els: list[dict]) -> str:
     lines = []
     for d in els:
@@ -133,8 +162,12 @@ def format_elements(els: list[dict]) -> str:
             parts.append("(hidden native dropdown)")
         if d.get("in_popup"):
             parts.append("(in open popup)")
+        if d.get("picker"):
+            parts.append("(in size picker)")
         if d.get("choice"):
             parts.append("(clickable choice)")
+        if d.get("disabled"):
+            parts.append("(disabled)")
         for k in ("role", "label", "aria", "ph", "title", "text", "img", "name", "value"):
             if d.get(k):
                 parts.append(f'{k}="{d[k]}"')
@@ -219,6 +252,28 @@ async def robust_click(page: Page, el: Locator):
             if await _click_landed(page, el, url_before):
                 return
     raise RuntimeError("could not click the element (covered by something or removed)")
+
+async def click_text(page: Page, text: str):
+    """Click a visible element by its exact text, preferring size pickers and popups."""
+    t = (text or "").strip()
+    if not t:
+        raise RuntimeError("no text to click")
+    pattern = re.compile(r"^\s*" + re.escape(t) + r"\s*$", re.I)
+    for scope in (page.locator(PICKER_SCOPE), page.locator(POPUP_SCOPE), page.locator("body")):
+        loc = scope.get_by_text(pattern)
+        try:
+            n = await loc.count()
+        except Exception:
+            continue
+        for k in range(min(n, 10)):
+            item = loc.nth(k)
+            try:
+                if await item.is_visible():
+                    await robust_click(page, item)
+                    return
+            except Exception:
+                continue
+    raise RuntimeError(f"no visible element with text {t!r}")
 
 def _q(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
