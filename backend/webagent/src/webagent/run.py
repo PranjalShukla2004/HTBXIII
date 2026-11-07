@@ -1,5 +1,5 @@
 import asyncio, hashlib, json, re, sys
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import urlparse
 from playwright.async_api import BrowserContext, Page
 from .abstract import VAR, FORBIDDEN
@@ -12,8 +12,17 @@ from .schemas import IntentProgram, SiteResult, Binding, AgentEvent
 
 MAX_HOPS = 3
 MAX_REPEAT = 20
+MAX_ASKS = 3
 PAGE_CHANGING = {"search", "click", "press"}
 CACHE_KEYS = ("tag", "type", "label", "aria", "ph", "name", "text", "href")
+QTY_VAR = re.compile(r"qty|quantit", re.I)
+
+AskFn = Callable[[str, str, list[str]], Awaitable[Optional[str]]]
+
+CART_CHECK = ("The product was just added to the shopping basket/bag: a confirmation message, "
+              "a mini-basket or side panel showing the item, or a basket count above zero is visible. "
+              "If a size/colour picker is still waiting for a choice, or a message like "
+              "'please select a size' is shown, it was NOT added.")
 
 GROUND_SYSTEM = """You operate a web browser on an online shop you have never seen before.
 You get the remaining steps of a site-independent shopping program, the current page,
@@ -27,36 +36,60 @@ opening a product, adding to cart, opening the basket).
 Return ONLY JSON:
 {"actions": [
   {"step": <the step number exactly as shown in brackets>,
-   "status": "ok" | "partial" | "move" | "already_done" | "not_found" | "needs_human",
+   "status": "ok" | "partial" | "move" | "already_done" | "not_found" | "needs_input" | "needs_human",
    "element_id": integer or null,
    "action": "fill" | "search" | "select" | "click" | "check" | "press" | null,
    "value": string or null,
    "repeat": integer,
+   "question": string or null,
+   "field": string or null,
+   "options": [string, ...] or null,
    "reason": "short explanation"}
 ]}
 
 Status:
 - ok: performing this action completes the step.
 - partial: this action is needed but the step is not finished yet (e.g. opening a custom
-  dropdown before its option can be chosen). It must be the LAST action you return.
+  dropdown before its option can be chosen, or clicking a search icon that only opens the
+  search box). It must be the LAST action you return.
 - move: the step cannot be done here, but element_id leads to a page where it can
   (e.g. a "Products"/"Shop" link to reach a search box). It must be the LAST action.
 - already_done: the page already satisfies the step (e.g. already on the home page,
   quantity already equals value).
 - not_found: nothing here does the step and nothing obviously leads to it.
+- needs_input: the page requires a choice the shopper has not made and the variables and
+  USER CHOICES don't answer - most often a SIZE, sometimes colour or fit (e.g. a size picker
+  appeared, or "please select a size" is shown). Set "question" (short, addressed to the
+  shopper), "field" (snake_case, e.g. "size") and "options" (the EXACT texts of the choices
+  that are available; skip ones marked unavailable or out of stock). NEVER pick a size
+  yourself. It must be the ONLY action you return.
 - needs_human: a CAPTCHA, login wall or age gate blocks progress.
 
 Choose the action from the ELEMENT you found, not from the step's wording:
 - text or number input -> "fill"; the shop's search box -> "search" (types and presses Enter)
-- <select> -> "select", value = the EXACT option text from its options list
+- a search step is only ok once the query is typed and submitted; clicking a search icon
+  or link that just opens the search box is "click" with status "partial"
+- <select> -> "select", value = the EXACT option text from its options list (options may
+  read like "Qty: 2" or "2 items"; return that exact text). This includes elements marked
+  "(hidden native dropdown)": shops often hide the real <select> behind a styled button.
+  ALWAYS prefer the hidden <select> over the styled button; one "select" action completes
+  the step. If its current value already equals the target -> already_done.
+- custom dropdown with no <select> (a button with haspopup, expanded=false, or text like
+  "Quantity: 1") -> "click" it with status "partial". On the next look its choices appear
+  marked "(in open popup)": "click" the one matching the value with status "ok".
 - quantity shown with +/- buttons -> "click" the + button with repeat = target minus the
   current value; if the current value already equals the target -> already_done
-- custom dropdown that is not a <select> -> "click" it with status "partial"
+- no quantity control at all on the product page -> not_found (the step is optional)
 - checkbox/radio -> "check" with value "true" or "false"
 - buttons, links, product tiles, colour/size swatches -> "click"
 
 Rules:
-- Match by meaning: "Add to basket", "Add to bag", "Buy" (on a product page) all mean add to cart.
+- USER CHOICES in the prompt are answers the shopper already gave. Use them: map to the
+  closest available option (e.g. "M" -> "M (UK 10)", "32" -> "W32"). Only ask again
+  (needs_input) if no available option is reasonably close.
+- If a NOTE is given, follow it: it explains what went wrong on the previous attempt.
+- Match by meaning: "Add to basket", "Add to bag", "Add", "Buy" (on a product page) all
+  mean add to cart.
 - To pick a product, compare the step with the element's text and ctx (its product card).
 - Prefer the main content over header/footer, except the site search box.
 - If a cookie/consent banner blocks everything, return move with its accept button.
@@ -102,6 +135,16 @@ def _step_index(a: dict, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
+def _qty_target(step, vars_: dict) -> int:
+    """If this step sets a quantity variable, return the requested number (else 1)."""
+    for r in VAR.findall(step.value or ""):
+        if QTY_VAR.search(r):
+            try:
+                return max(1, int(str(vars_.get(r, "1")).strip()))
+            except ValueError:
+                return 1
+    return 1
+
 # ---------- cache ----------
 def cache_path(program: IntentProgram, url: str):
     key = hashlib.sha1(program.model_dump_json().encode()).hexdigest()[:10]
@@ -115,9 +158,10 @@ def load_cache(program: IntentProgram, url: str) -> dict:
         return {}
 
 def cacheable(step, acts: list[dict]) -> bool:
-    """Replayable only if the step doesn't depend on the item (e.g. not 'product matching {{query}}')."""
-    return "{{" not in step.target and not any(
-        a["action"] == "click" and a.get("repeat", 1) > 1 for a in acts)
+    """Replayable only if the step doesn't depend on the item or on a user's answer."""
+    return ("{{" not in step.target
+            and not any(a["action"] == "click" and a.get("repeat", 1) > 1 for a in acts)
+            and not any(a.get("answer") for a in acts))
 
 async def replay_step(page: Page, acts: list[dict], value: Optional[str], *,
                       on_action: Optional[Callable[[dict], None]] = None) -> bool:
@@ -144,23 +188,30 @@ async def replay_step(page: Page, acts: list[dict], value: Optional[str], *,
 
 # ---------- LLM helpers ----------
 async def ground(page: Page, program: IntentProgram, window: list[int], vars_: dict,
-                 els: list[dict]) -> list[dict]:
+                 els: list[dict], *, answers: Optional[dict] = None, hint: str = "") -> list[dict]:
     lines = []
     for k in window:
         s = program.steps[k]
         v = render(s.value, vars_)
         lines.append(f"[{k}] {s.op}: {render(s.target, vars_)}"
                      + (f"  value={v}" if v else "") + ("  (optional)" if s.optional else ""))
+    extra = ""
+    if answers:
+        extra += ("USER CHOICES (already answered by the shopper; use them, don't ask again): "
+                  + ", ".join(f"{k}={v}" for k, v in answers.items()) + "\n")
+    if hint:
+        extra += f"NOTE: {hint}\n"
     u = urlparse(page.url)
     user = (f"OVERALL GOAL: {render(program.goal, vars_)}\n\n"
-            "REMAINING STEPS (start with the first):\n" + "\n".join(lines) + "\n\n"
+            + (extra + "\n" if extra else "")
+            + "REMAINING STEPS (start with the first):\n" + "\n".join(lines) + "\n\n"
             f"PAGE: title={await page.title()!r} path={u.path}{'?' + u.query if u.query else ''}\n"
             f"ELEMENTS:\n{format_elements(els)}")
     out = await llm_json(GROUND_SYSTEM, user, tag="ground")
     return (out.get("actions", []) if isinstance(out, dict) else out) or []
 
-async def verify(page: Page, condition: str) -> dict:
-    text = await page_text(page)
+async def verify(page: Page, condition: str, limit: int = 4000) -> dict:
+    text = await page_text(page, limit=limit)
     return await llm_json(VERIFY_SYSTEM, f"CONDITION: {condition}\n\nPAGE TEXT:\n{text}",
                           tag="verify", cheap=True)
 
@@ -180,14 +231,23 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                       on_event: Optional[Callable[[AgentEvent], None]] = None,
                       on_action: Optional[Callable[[dict], None]] = None,
                       page: Optional[Page] = None,
-                      run_tag: Optional[str] = None) -> SiteResult:
-    vars_ = {**program.variables, **(variables or {})}
+                      run_tag: Optional[str] = None,
+                      ask: Optional[AskFn] = None,
+                      answers: Optional[dict] = None) -> SiteResult:
+    """ask(field, question, options) -> answer or None. answers: shared dict of the shopper's
+    choices (e.g. {"size": "M"}); pass the same dict to every shop in a run to ask only once."""
+    answers = answers if answers is not None else {}
+    vars_ = {**program.variables, **(variables or {}), **answers}
     steps = program.steps
     verify_idx = [k for k, s in enumerate(steps) if s.op == "verify"]
     final_verify = verify_idx[-1] if verify_idx else None
+    action_idx = [k for k, s in enumerate(steps) if s.op not in ("verify", "extract")]
+    add_step = action_idx[-1] if action_idx else None
+    check_after_add = add_step is not None and (final_verify is None or final_verify < add_step)
     result = SiteResult(url=url, status="navigating", variables=vars_)
     cache = load_cache(program, url)
     performed: dict[int, list[dict]] = {}
+    answered_steps: set[int] = set()
 
     def emit(kind, message, **data):
         if on_event:
@@ -205,125 +265,197 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
         emit("status", "acting", cached=bool(cache))
 
         i, hops, last_reason = 0, 0, ""
-        while i < len(steps):
-            step = steps[i]
+        hint, cart_checked, cart_retries, extra_adds, repeating, asks = "", False, 0, 0, False, 0
 
-            if step.op == "extract":
-                j, fields = i, {}
-                while j < len(steps) and steps[j].op == "extract":
-                    fields[steps[j].output or f"field_{j}"] = render(steps[j].target, vars_)
-                    j += 1
-                vals = await extract(page, fields)
-                result.outputs.update(vals)
-                result.outputs.setdefault("product_url", page.url)
-                emit("step", f"extract {vals}", step=i, outputs=vals)
-                i = j
-                continue
+        while True:
+            while i < len(steps):
+                if repeating and i > add_step:
+                    break                                   # extra adds: only redo add-to-basket
+                step = steps[i]
 
-            if step.op == "verify":
-                if i != final_verify:
-                    emit("log", f"skipped intermediate verify {i}")
+                if step.op == "extract":
+                    j, fields = i, {}
+                    while j < len(steps) and steps[j].op == "extract":
+                        fields[steps[j].output or f"field_{j}"] = render(steps[j].target, vars_)
+                        j += 1
+                    vals = await extract(page, fields)
+                    result.outputs.update(vals)
+                    result.outputs.setdefault("product_url", page.url)
+                    emit("step", f"extract {vals}", step=i, outputs=vals)
+                    i = j
+                    continue
+
+                if step.op == "verify":
+                    if i != final_verify:
+                        emit("log", f"skipped intermediate verify {i}")
+                        i += 1
+                        continue
+                    target = render(step.target, vars_)
+                    v = await verify(page, target)
+                    emit("step", f"verify '{target}': {v.get('passed')} ({v.get('evidence')})", step=i)
+                    if not v.get("passed") and not step.optional:
+                        raise StepFailed(f"verify failed: {target}")
                     i += 1
                     continue
-                target = render(step.target, vars_)
-                v = await verify(page, target)
-                emit("step", f"verify '{target}': {v.get('passed')} ({v.get('evidence')})", step=i)
-                if not v.get("passed") and not step.optional:
-                    raise StepFailed(f"verify failed: {target}")
-                i += 1
-                continue
 
-            # ---- fast path: replay from cache ----
-            acts = cache.get(str(i))
-            if acts is not None and cacheable(step, acts):
-                await dismiss_overlays(page)
-                callback = (lambda a: on_action({"step": i, "target": render(step.target, vars_), **a})) \
-                    if on_action else None
-                if await replay_step(page, acts, render(step.value, vars_), on_action=callback):
-                    performed[i] = acts
-                    emit("step", f"[{i}] {step.op} replayed from cache", step=i, cached=True)
-                    i, hops = i + 1, 0
-                    continue
-                emit("log", f"cache miss at step {i}; asking the model", step=i)
-
-            # ---- slow path: ground with the LLM ----
-            j = i
-            while j < len(steps) and steps[j].op not in ("verify", "extract"):
-                j += 1
-            window = list(range(i, j))
-
-            await dismiss_overlays(page)
-            els = await describe_page(page)
-            actions = await ground(page, program, window, vars_, els)
-            if not actions:
-                actions = [{"step": i, "status": "not_found", "reason": "empty plan"}]
-            start_i = i
-
-            for n, a in enumerate(actions):
-                s = _step_index(a, i)
-                if s != i:
-                    if n == 0:
-                        s = i
-                    else:
-                        break
-                status, eid = a.get("status"), a.get("element_id")
-                el = next((e for e in els if e["id"] == eid), None)
-                action = a.get("action") or steps[i].op
-                value = a.get("value") or render(steps[i].value, vars_)
-                repeat = max(1, min(int(a.get("repeat") or 1), MAX_REPEAT))
-                last_reason = a.get("reason", "")
-                emit("step", f"[{i}] {action}{f' x{repeat}' if repeat > 1 else ''} "
-                             f"-> {status} [{eid}] {last_reason}", step=i)
-
-                if status in ("ok", "partial", "move") and el is None:
-                    status = "not_found"
-                if el is not None and forbidden(el):
-                    raise StepFailed(f"refused forbidden element: {el.get('text') or el.get('href')}")
-
-                if status == "needs_human":
-                    result.status, result.error = "needs_human", last_reason
-                    emit("status", "needs_human", reason=last_reason)
-                    return result
-                if status == "already_done":
-                    if steps[i].value is None:
-                        performed.setdefault(i, [])        # nothing to do: replays for free
-                    i, hops = i + 1, 0
-                    continue
-                if status not in ("ok", "partial", "move"):
-                    if steps[i].optional:
-                        emit("log", f"skipped optional step {i}")
+                # ---- fast path: replay (from cache, or the add that just worked when repeating) ----
+                acts = cache.get(str(i))
+                replayable = acts is not None and cacheable(step, acts)
+                if repeating and i == add_step and performed.get(i):
+                    acts, replayable = performed[i], True
+                if replayable:
+                    await dismiss_overlays(page)
+                    callback = (lambda a: on_action({"step": i, "target": render(step.target, vars_), **a})) \
+                        if on_action else None
+                    if await replay_step(page, acts, render(step.value, vars_), on_action=callback):
+                        if not repeating:
+                            performed[i] = acts
+                        emit("step", f"[{i}] {step.op} replayed from cache", step=i, cached=True)
                         i, hops = i + 1, 0
                         continue
-                    raise StepFailed(f"step {i} ({steps[i].op} '{render(steps[i].target, vars_)}'): "
-                                     f"{status} - {last_reason}")
+                    emit("log", f"cache miss at step {i}; asking the model", step=i)
 
-                for repetition in range(repeat):
-                    await act(page, el, action, value)
-                    if on_action:
-                        on_action({"step": i, "op": action, "target": render(steps[i].target, vars_),
-                                   "value": value, "element": el, "url": page.url,
-                                   "cached": False, "repeat": repeat, "repetition": repetition + 1,
-                                   "navigation_hop": status == "move", "partial": status == "partial"})
-                    if repeat > 1:
-                        await page.wait_for_timeout(250)
-                await settle(page)
-                performed.setdefault(i, []).append({"action": action, "locator": semantic(el),
-                                                    "value": value, "repeat": repeat, "status": status})
+                # ---- slow path: ground with the LLM ----
+                j = i
+                while j < len(steps) and steps[j].op not in ("verify", "extract"):
+                    j += 1
+                window = list(range(i, j))
 
-                if status == "ok":
-                    result.bindings.append(Binding(step=i, action=action, value=value,
-                                                   repeat=repeat, locator=semantic(el)))
-                    i, hops = i + 1, 0
-                    if action in PAGE_CHANGING:
+                await dismiss_overlays(page)
+                els = await describe_page(page)
+                actions = await ground(page, program, window, vars_, els, answers=answers, hint=hint)
+                if not actions:
+                    actions = [{"step": i, "status": "not_found", "reason": "empty plan"}]
+                start_i, answered_now = i, False
+
+                for n, a in enumerate(actions):
+                    s = _step_index(a, i)
+                    if s != i:
+                        if n == 0:
+                            s = i
+                        else:
+                            break
+                    status, eid = a.get("status"), a.get("element_id")
+                    el = next((e for e in els if e["id"] == eid), None)
+                    action = a.get("action") or steps[i].op
+                    value = a.get("value") or render(steps[i].value, vars_)
+                    if steps[i].op == "search":
+                        if action == "fill":
+                            action = "search"                   # typing into search = submit it too
+                        if status == "ok" and action not in ("search", "press"):
+                            status = "partial"                  # icon click only opened the box
+                    repeat = max(1, min(int(a.get("repeat") or 1), MAX_REPEAT))
+                    last_reason = a.get("reason", "")
+                    emit("step", f"[{i}] {action}{f' x{repeat}' if repeat > 1 else ''} "
+                                 f"-> {status} [{eid}] {last_reason}", step=i)
+
+                    if status in ("ok", "partial", "move") and el is None:
+                        status = "not_found"
+                    if el is not None and forbidden(el):
+                        raise StepFailed(f"refused forbidden element: {el.get('text') or el.get('href')}")
+
+                    if status == "needs_input":
+                        field = re.sub(r"\W+", "_", str(a.get("field") or "choice").lower()).strip("_") or "choice"
+                        question = a.get("question") or f"Which {field.replace('_', ' ')} would you like?"
+                        options = [str(o) for o in (a.get("options") or [])][:40]
+                        asks += 1
+                        if ask is None or asks > MAX_ASKS:
+                            result.status, result.error = "needs_human", question
+                            emit("status", "needs_human", reason=question, field=field, options=options)
+                            return result
+                        emit("status", "needs_input", field=field, question=question,
+                             options=options, step=i)
+                        answer = await ask(field, question, options)
+                        if not answer:
+                            result.status, result.error = "needs_human", f"no answer to: {question}"
+                            emit("status", "needs_human", reason=result.error)
+                            return result
+                        answers[field] = vars_[field] = answer.strip()
+                        answered_steps.add(i)
+                        emit("log", f"shopper chose {field} = {answers[field]}", step=i,
+                             answer={field: answers[field]})
+                        answered_now = True
+                        break                                   # re-plan this step with the answer
+
+                    if status == "needs_human":
+                        result.status, result.error = "needs_human", last_reason
+                        emit("status", "needs_human", reason=last_reason)
+                        return result
+                    if status == "already_done":
+                        if steps[i].value is None and not repeating:
+                            performed.setdefault(i, [])
+                        i, hops = i + 1, 0
+                        continue
+                    if status not in ("ok", "partial", "move"):
+                        if steps[i].optional:
+                            qty = _qty_target(steps[i], vars_)
+                            if qty > 1 and add_step is not None and i < add_step and not repeating:
+                                extra_adds = qty - 1
+                                emit("log", f"no quantity control here; will add to basket {qty} times")
+                            emit("log", f"skipped optional step {i}")
+                            i, hops = i + 1, 0
+                            continue
+                        raise StepFailed(f"step {i} ({steps[i].op} '{render(steps[i].target, vars_)}'): "
+                                         f"{status} - {last_reason}")
+
+                    for repetition in range(repeat):
+                        await act(page, el, action, value)
+                        if on_action:
+                            on_action({"step": i, "op": action, "target": render(steps[i].target, vars_),
+                                       "value": value, "element": el, "url": page.url,
+                                       "cached": False, "repeat": repeat, "repetition": repetition + 1,
+                                       "navigation_hop": status == "move", "partial": status == "partial"})
+                        if repeat > 1:
+                            await page.wait_for_timeout(250)
+                    await settle(page)
+                    if not repeating:
+                        rec = {"action": action, "locator": semantic(el), "value": value,
+                               "repeat": repeat, "status": status}
+                        if i in answered_steps:
+                            rec["answer"] = True
+                        performed.setdefault(i, []).append(rec)
+
+                    if status == "ok":
+                        result.bindings.append(Binding(step=i, action=action, value=value,
+                                                       repeat=repeat, locator=semantic(el)))
+                        i, hops = i + 1, 0
+                        if action in PAGE_CHANGING:
+                            break
+                    else:
+                        hops += 1
                         break
-                else:
-                    hops += 1
-                    break
 
-            if i == start_i:
-                hops += 1
-            if hops > MAX_HOPS:
-                raise StepFailed(f"step {i} made no progress after {MAX_HOPS} attempts ({last_reason})")
+                if i == start_i and not answered_now:
+                    hops += 1
+                if hops > MAX_HOPS:
+                    raise StepFailed(f"step {i} made no progress after {MAX_HOPS} attempts ({last_reason})")
+
+            # ---- after the steps: did it really go into the basket? ----
+            hint = ""
+            if check_after_add and not cart_checked:
+                v = await verify(page, CART_CHECK, limit=6000)
+                passed = bool(v.get("passed"))
+                emit("step", f"basket check: {passed} ({v.get('evidence')})", step=add_step, passed=passed)
+                if not passed:
+                    if cart_retries >= 2:
+                        raise StepFailed(f"item was not added to the basket ({v.get('evidence')})")
+                    cart_retries += 1
+                    hint = ("The last attempt did NOT add the item to the basket. Look for a required "
+                            "choice (size, colour, fit) or an error message, then add it to the basket.")
+                    i, hops = add_step, 0
+                    continue
+                cart_checked = True
+
+            # ---- no quantity box: add the same item again ----
+            if extra_adds > 0:
+                extra_adds -= 1
+                repeating = True
+                hint = ("This shop has no quantity control: add ONE MORE of the same product to the "
+                        "basket, with the same size/options as before.")
+                emit("log", f"adding another one to the basket ({extra_adds} more after this)")
+                i, hops = add_step, 0
+                continue
+            break
 
         result.status = "done"
         try:
@@ -354,14 +486,18 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
 async def run_batch(ctx: BrowserContext, jobs: list[dict], program: IntentProgram, *,
                     on_event: Optional[Callable[[AgentEvent], None]] = None,
                     on_action: Optional[Callable[[dict], None]] = None,
-                    on_result=None, concurrency: int = 2) -> list[tuple[dict, SiteResult]]:
+                    on_result=None, concurrency: int = 2,
+                    ask: Optional[AskFn] = None, answers: Optional[dict] = None
+                    ) -> list[tuple[dict, SiteResult]]:
     sem = asyncio.Semaphore(concurrency)
     results: list[tuple[dict, SiteResult]] = []
+    answers = answers if answers is not None else {}
 
     async def one(job: dict):
         async with sem:
             res = await run_program(ctx, job["url"], program, variables=job.get("variables"),
-                                    on_event=on_event, on_action=on_action, run_tag=str(job.get("key", "")))
+                                    on_event=on_event, on_action=on_action,
+                                    run_tag=str(job.get("key", "")), ask=ask, answers=answers)
             results.append((job, res))
             if on_result:
                 await on_result(job, res)
@@ -370,6 +506,13 @@ async def run_batch(ctx: BrowserContext, jobs: list[dict], program: IntentProgra
     return results
 
 # ---------- CLI ----------
+async def cli_ask(field: str, question: str, options: list[str]) -> Optional[str]:
+    print(f"\n[agent] {question}")
+    if options:
+        print("        options: " + " | ".join(options))
+    ans = await asyncio.get_running_loop().run_in_executor(None, input, f"        your {field}: ")
+    return ans.strip() or None
+
 # uv run python -m webagent.run <intent_name> <url> [var=value ...]
 async def _main():
     name, url = sys.argv[1], sys.argv[2]
@@ -380,7 +523,8 @@ async def _main():
         print(f"[{ev.kind:6}] {ev.message}")
 
     async with launch() as ctx:
-        result = await run_program(ctx, url, program, variables=overrides, on_event=show)
+        result = await run_program(ctx, url, program, variables=overrides, on_event=show,
+                                   ask=cli_ask, answers={})
     print(f"\nRESULT: {result.status}" + (f" - {result.error}" if result.error else ""))
     print(f"OUTPUTS: {result.outputs}")
     print(f"LLM calls: {stats['calls']}   screenshot: {result.screenshot}")

@@ -7,7 +7,9 @@ DESCRIBE_JS = r"""
   document.querySelectorAll('[data-agent-id]').forEach(e => e.removeAttribute('data-agent-id'));
 
   const SEL = 'input:not([type=hidden]),textarea,select,button,a[href],summary,[onclick],' +
-              '[role=button],[role=link],[role=option],[role=radio],[role=tab],[role=combobox],[role=searchbox],[role=spinbutton]';
+              '[role=button],[role=link],[role=option],[role=radio],[role=tab],[role=combobox],' +
+              '[role=searchbox],[role=spinbutton],[role=menuitem],[role=menuitemradio],[aria-haspopup]';
+  const POPUP = '[role=listbox],[role=menu],[role=dialog],[aria-modal=true],[class*=popover]';
   const visible = el => {
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return false;
@@ -21,7 +23,7 @@ DESCRIBE_JS = r"""
   };
 
   const seen = new Set();
-  const info = el => {
+  const info = (el, hiddenSelect) => {
     const tag = el.tagName.toLowerCase();
     const d = {
       tag, type: el.getAttribute('type'), role: el.getAttribute('role'),
@@ -32,7 +34,16 @@ DESCRIBE_JS = r"""
       href: tag === 'a' ? (el.getAttribute('href') || '').slice(0, 80) : null,
     };
     if ((tag === 'input' || tag === 'textarea') && el.type !== 'password') d.value = clean(el.value).slice(0, 40);
-    if (tag === 'select') d.options = [...el.options].map(o => clean(o.text)).slice(0, 25);
+    if (tag === 'select') {
+      d.text = null;                                   // options list says it all
+      d.options = [...el.options].map(o => clean(o.text)).slice(0, 30);
+      d.value = clean(el.options[el.selectedIndex]?.text || '');
+      if (hiddenSelect) d.hidden = true;
+    }
+    const pop = el.getAttribute('aria-haspopup');
+    if (pop && pop !== 'false') d.popup = pop;
+    const exp = el.getAttribute('aria-expanded');
+    if (exp) d.expanded = exp;
     if (tag === 'a' || tag === 'button' || el.matches('[onclick],[role=button]')) {
       const card = el.closest('[class*=product],[class*=card],[class*=item],article,li');
       const ctx = card ? clean(card.innerText).slice(0, 120) : '';
@@ -48,13 +59,24 @@ DESCRIBE_JS = r"""
     return d;
   };
 
-  const controls = [], links = [];
+  const popup = [], controls = [], links = [];
   for (const el of document.querySelectorAll(SEL)) {
-    if (!visible(el)) continue;
-    const d = info(el);
-    if (d) (d.tag === 'a' ? links : controls).push([el, d]);
+    const isVisible = visible(el);
+    // styled shops often hide the real <select> behind a fake button: keep it anyway
+    const hiddenSelect = !isVisible && el.tagName === 'SELECT' && !el.disabled && el.options.length > 1;
+    if (!isVisible && !hiddenSelect) continue;
+    const d = info(el, hiddenSelect);
+    if (!d) continue;
+    const inPopup = isVisible &&
+      (el.matches('[role=option],[role=menuitem],[role=menuitemradio]') || el.closest(POPUP));
+    if (inPopup) {
+      d.in_popup = true;
+      popup.push([el, d]);                             // open dropdown options go first
+    } else {
+      (d.tag === 'a' ? links : controls).push([el, d]);
+    }
   }
-  return controls.concat(links).slice(0, maxEls).map(([el, d], i) => {
+  return popup.concat(controls, links).slice(0, maxEls).map(([el, d], i) => {
     el.setAttribute('data-agent-id', String(i));
     d.id = i;
     return d;
@@ -86,9 +108,17 @@ def format_elements(els: list[dict]) -> str:
     for d in els:
         head = f"[{d['id']}] {d['tag']}" + (f"[{d['type']}]" if d.get("type") else "")
         parts = [head]
-        for k in ("label", "aria", "ph", "title", "text", "img", "name", "value"):
+        if d.get("hidden"):
+            parts.append("(hidden native dropdown)")
+        if d.get("in_popup"):
+            parts.append("(in open popup)")
+        for k in ("role", "label", "aria", "ph", "title", "text", "img", "name", "value"):
             if d.get(k):
                 parts.append(f'{k}="{d[k]}"')
+        if d.get("popup"):
+            parts.append(f'haspopup={d["popup"]}')
+        if d.get("expanded"):
+            parts.append(f'expanded={d["expanded"]}')
         if d.get("options"):
             parts.append("options=" + json.dumps(d["options"]))
         if d.get("href"):
@@ -184,37 +214,54 @@ async def resolve_locator(page: Page, loc: dict):
         cands.append(page.locator(f'{tag}[name="{_q(loc["name"])}"]'))
     if loc.get("href") and tag == "a":
         cands.append(page.locator(f'a[href="{_q(loc["href"])}"]'))
-    if loc.get("text") and tag not in ("input", "textarea"):
+    if loc.get("text") and tag not in ("input", "textarea", "select"):
         cands.append(page.locator(tag).filter(
             has_text=re.compile(r"^\s*" + re.escape(loc["text"]) + r"\s*$")))
     if loc.get("text") and (tag == "button" or loc.get("type") in ("button", "submit")):
         cands.append(page.get_by_role("button", name=loc["text"], exact=True))
     if loc.get("text") and tag == "input":
         cands.append(page.locator(f'input[value="{_q(loc["text"])}"]'))
+    state = "attached" if tag == "select" else "visible"     # selects may be hidden on purpose
     for c in cands:
         try:
             first = c.first
-            await first.wait_for(state="visible", timeout=2000)
+            await first.wait_for(state=state, timeout=2000)
             return first
         except Exception:
             continue
     return None
+
+async def _select(el: Locator, value: str | None):
+    """Pick an option on a (possibly hidden) <select>, tolerating labels like 'Qty: 2'."""
+    v = (value or "").strip()
+    for kwargs in ({"label": v}, {"value": v}):
+        for force in (False, True):
+            try:
+                await el.select_option(**kwargs, force=force, timeout=3000)
+                return
+            except Exception:
+                pass
+    opts = await el.evaluate("s => [...s.options].map(o => ({t: o.text.trim(), v: o.value}))")
+    for o in opts:
+        hit = (re.search(rf"(^|\D){re.escape(v)}(\D|$)", o["t"]) if v.isdigit()
+               else v.lower() in o["t"].lower())
+        if hit:
+            await el.select_option(value=o["v"], force=True, timeout=3000)
+            return
+    raise RuntimeError(f"no option matching {v!r} in dropdown")
 
 async def act(page: Page, element: dict, op: str, value: str | None = None):
     el = page.locator(f'[data-agent-id="{element["id"]}"]').first
     await act_on(page, el, element["tag"], op, value)
 
 async def act_on(page: Page, el: Locator, tag: str, op: str, value: str | None = None):
+    if tag == "select":                          # before scrolling: hidden selects can't scroll
+        await _select(el, value)
+        return
     try:
         await el.scroll_into_view_if_needed(timeout=3000)
     except Exception:
         pass
-    if tag == "select":
-        try:
-            await el.select_option(label=value)
-        except Exception:
-            await el.select_option(value=value)
-        return
     if op in ("fill", "search") and tag in ("input", "textarea"):
         await el.fill(value or "")
         if op == "search":
