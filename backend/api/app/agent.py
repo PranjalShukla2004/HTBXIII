@@ -21,7 +21,8 @@ class AgentBackend:
         with observe_llm(on_llm):
             return await abstract(trace)
 
-    async def run(self, url, program, arguments, *, on_event, on_action, on_llm, choices=None):
+    async def run(self, url, program, arguments, *, on_event, on_action, on_llm, choices=None,
+                  ask=None, answers=None, constraints=None):
         from webagent.browser import launch, launch_isolated
         from webagent.llm import observe_llm
         from webagent.orchestrator import NEEDED
@@ -35,9 +36,13 @@ class AgentBackend:
         with observe_llm(on_llm):
             async with opener as browser:
                 page = await browser.new_page()
+                # ask(): questions the page raises (e.g. a size) go to the dashboard and wait for the
+                # shopper; choices/answers: options already chosen; constraints: budget, item count,
+                # requirements (shopping only).
                 result = await run_program(browser, url, program, variables=arguments,
                                            on_event=on_event, on_action=on_action, page=page,
-                                           answers=dict(choices or {}))
+                                           ask=ask, answers={**(choices or {}), **(answers or {})},
+                                           constraints=constraints)
                 if result.status == "done" and shopping:
                     # The table and sheet always want a product name and price.
                     missing = {k: d for k, d in NEEDED.items() if not result.outputs.get(k)}

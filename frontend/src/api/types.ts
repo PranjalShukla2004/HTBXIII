@@ -97,8 +97,20 @@ export interface ActivityItem {
   url?: string
 }
 
+/** What the shopper asked for beyond the skill's inputs, read from the message by the planner. */
+export interface RunConstraints {
+  /** Different products wanted from each site. */
+  items: number
+  /** Most one item may cost. */
+  maxPrice?: number
+  /** Budget for all items together. */
+  totalBudget?: number
+  currency?: string
+  requirements: string[]
+}
+
 export type RunEvent =
-  | { type: 'plan'; summary: string; variables: Record<string, string>; targets: RunTarget[]; choices?: Record<string, string> }
+  | { type: 'plan'; summary: string; variables: Record<string, string>; targets: RunTarget[]; choices?: Record<string, string>; constraints?: RunConstraints }
   | { type: 'target_start'; targetId: string; totalSteps: number }
   | {
       type: 'step'
@@ -122,7 +134,14 @@ export type RunEvent =
   | { type: 'activity'; targetId: string; item: ActivityItem }
   /** The agent stopped on a site with a question (backend has no resume; shown for the user to act on). */
   | { type: 'attention'; targetId: string; question: string; options: string[] }
-  | { type: 'target_done'; targetId: string; status: 'ok' | 'failed' | 'needs_human'; result?: Record<string, string | number>; message?: string; detail?: string }
+  /** The site is paused, waiting for the shopper's answer (e.g. a size); `answerTarget` continues it. */
+  | { type: 'question'; targetId: string; field: string; question: string; options: string[] }
+  /** The agent received the shopper's answer and carried on. */
+  /** perItem: the answer (e.g. a size) is for this site's current product only, not the whole run. */
+  | { type: 'answered'; targetId: string; field: string; value: string; perItem?: boolean }
+  | { type: 'target_done'; targetId: string; status: 'ok' | 'failed' | 'needs_human'; result?: Record<string, string | number>; message?: string; detail?: string;
+      /** One entry per different product put in the basket, when several were asked for. */
+      items?: Record<string, string | number>[] }
   | { type: 'done'; summary: string; table?: ResultTable; needsApproval?: string; status?: 'done' | 'failed' | 'needs_human' }
   | { type: 'error'; message: string; stopped?: boolean }
 
@@ -143,4 +162,6 @@ export interface AgentApi {
   stopRun(runId: string): Promise<void>
   /** Continue a site after the person has handled it. Only the mock supports this today. */
   resumeTarget?(runId: string, targetId: string): Promise<void>
+  /** Answer the question a site is waiting on (see the `question` event). Remembered for later sites. */
+  answerTarget?(runId: string, targetId: string, value: string): Promise<void>
 }

@@ -34,7 +34,21 @@ export interface BackendResult {
   /** Plan only: the Google Sheet to log results to, and whether the user asked for it. */
   sheet_url?: string | null
   log_to_sheet?: boolean
+  /** Plan only: budget, number of different products, requirements. Sent to runs as-is. */
+  constraints?: BackendConstraints
+  /** Run only, with constraints: one entry per different product put in the basket. */
+  items?: Record<string, unknown>[]
+  /** Run only: e.g. "added 2 of 3 items; ...". */
+  note?: string | null
   [key: string]: unknown
+}
+
+export interface BackendConstraints {
+  items?: number
+  max_price?: number | null
+  total_budget?: number | null
+  currency?: string | null
+  requirements?: string[]
 }
 
 export interface BackendJob {
@@ -46,6 +60,8 @@ export interface BackendJob {
   created_at: number
   result: BackendResult | null
   error: { code: string; message: string } | null
+  /** Set while a run waits for the shopper (POST /api/jobs/{id}/answer continues it). */
+  question?: { field: string; question: string; options: string[] } | null
   log_url: string
   streams: { llm: string; events: string }
 }

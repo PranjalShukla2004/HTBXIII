@@ -1,9 +1,9 @@
 import { isRecord, TERMINAL } from './backend.ts'
 import type { BackendJob, BackendResult, BackendSkill, JobFrame } from './backend.ts'
-import { describeError, recordingAction, runEvents, skillFromBackend } from './mapping.ts'
+import { constraintsFromBackend, constraintsToBackend, describeError, perItemChoice, recordingAction, runEvents, skillFromBackend } from './mapping.ts'
 import { subscribeJob } from './websocket.ts'
 import type { ConnectionState } from './websocket.ts'
-import type { AgentApi, RecordingEvent, RunEvent, Skill, SkillDraft, Unsubscribe } from './types.ts'
+import type { AgentApi, RecordingEvent, RunConstraints, RunEvent, Skill, SkillDraft, Unsubscribe } from './types.ts'
 
 const BASE = (import.meta.env?.VITE_API_URL as string | undefined) ?? 'http://localhost:8000'
 /** Sites shopped at the same time after the first one. Keep in step with MAX_PARALLEL_RUNS on the backend. */
@@ -13,10 +13,21 @@ const isAbort = (error: unknown) => error instanceof Error && error.name === 'Ab
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
 const cell = (value: unknown): string | number => value == null ? '—' :
   typeof value === 'string' || typeof value === 'number' ? value : JSON.stringify(value)
+/** Different products a site put in the basket (only when the shopper asked for constraints). */
+const itemsOf = (job: BackendJob) => Array.isArray(job.result?.items) ? job.result.items.filter(isRecord) : []
+const cells = (record: Record<string, unknown>) => Object.fromEntries(Object.entries(record).map(([key, value]) => [key, cell(value)]))
+
+interface RunSession {
+  controller: AbortController; first: BackendJob; skillIds: string[]; prompt: string; jobs: Set<string>; started: boolean
+  /** The shopper's answers so far (e.g. colour), sent to every later site so it asks only once. Sizes aren't kept: each site asks. */
+  answers: Record<string, string>
+  /** Sites currently waiting for an answer: target → its job and the field asked about. */
+  asking: Map<string, { jobId: string; field: string }>
+}
 
 export function createHttpApi(baseUrl: string): AgentApi {
   const base = baseUrl.replace(/\/$/, '')
-  const runs = new Map<string, { controller: AbortController; first: BackendJob; skillIds: string[]; prompt: string; jobs: Set<string>; started: boolean }>()
+  const runs = new Map<string, RunSession>()
   const recordings = new Map<string, { job: BackendJob; listeners: Set<(event: RecordingEvent) => void>; controller: AbortController; done?: Promise<BackendJob>; draft?: SkillDraft }>()
 
   async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -108,7 +119,8 @@ export function createHttpApi(baseUrl: string): AgentApi {
   }
 
   async function followRunJob(job: BackendJob, signal: AbortSignal, skill: Skill, emit: (event: RunEvent) => void,
-                              targetId?: string, vars?: Record<string, string>, seen: { lastUrl?: string } = {}) {
+                              targetId?: string, vars?: Record<string, string>, seen: { lastUrl?: string } = {},
+                              asking?: RunSession['asking']) {
     let logCursor = 0
     return monitor(job, signal, async (frame) => {
       if (frame.type === 'action' && typeof frame.data.url === 'string') seen.lastUrl = frame.data.url
@@ -122,7 +134,11 @@ export function createHttpApi(baseUrl: string): AgentApi {
         } else emit({ type: 'log', targetId, level: 'warn', ts: new Date().toISOString(), message: 'Some earlier model detail expired; current job progress is still available.' })
       }
       if (frame.type === 'log' && frame.seq <= logCursor) return
-      for (const event of runEvents(frame, skill, targetId, vars)) emit(event)
+      for (const event of runEvents(frame, skill, targetId, vars)) {
+        if (event.type === 'question') asking?.set(event.targetId, { jobId: job.job_id, field: event.field })
+        if (event.type === 'answered') asking?.delete(event.targetId)
+        emit(event)
+      }
     }, (channel, state) => emit({ type: 'connection', channel, state, targetId }))
   }
 
@@ -130,7 +146,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
     const session = runs.get(id)!
     const signal = session.controller.signal
     try {
-      const plans: { skill: Skill; variables: Record<string, string>; choices: Record<string, string>; sites: string[]; summary: string; sheetUrl?: string }[] = []
+      const plans: { skill: Skill; variables: Record<string, string>; choices: Record<string, string>; constraints?: RunConstraints; sites: string[]; summary: string; sheetUrl?: string }[] = []
       for (const [index, skillId] of session.skillIds.entries()) {
         if (signal.aborted) throw abortError()
         const skill = skillFromBackend(await req<BackendSkill>(`/api/skills/${encodeURIComponent(skillId)}`))
@@ -141,6 +157,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
         const choices = result.result.choices
         plans.push({ skill, variables: result.result.variables ?? {}, sites: result.result.sites, summary: String(result.result.summary || skill.description),
           choices: isRecord(choices) ? Object.fromEntries(Object.entries(choices).map(([key, value]) => [key, String(value)])) : {},
+          constraints: constraintsFromBackend(result.result.constraints),
           sheetUrl: result.result.log_to_sheet && result.result.sheet_url ? result.result.sheet_url : undefined })
       }
       const targets = plans.flatMap((plan, planIndex) => plan.sites.map((url, index) => {
@@ -151,34 +168,43 @@ export function createHttpApi(baseUrl: string): AgentApi {
       if (!targets.length) throw new Error('The planner did not choose any sites.')
       emit({ type: 'plan', summary: plans.map((plan) => plan.summary).join(' · '), variables: Object.assign({}, ...plans.map((plan) => plan.variables)),
         choices: Object.assign({}, ...plans.map((plan) => plan.choices)),
+        constraints: plans.find((plan) => plan.constraints)?.constraints,
         targets: targets.map(({ id, url, name, plan }) => ({ id, url, name, skillId: plan.skill.id })) })
       const label = (status: string) => status === 'done' ? 'Done' : status === 'needs_human' ? 'Needs attention' : status === 'cancelled' ? 'Stopped' : 'Failed'
       type TargetResult = { target: typeof targets[number]; job: BackendJob; lastUrl?: string; note: string }
       const runTarget = async (target: typeof targets[number]): Promise<TargetResult> => {
         if (signal.aborted) throw abortError()
+        // Options from the message plus answers given on earlier sites (not sizes), so those are asked once.
+        const choices = { ...target.plan.choices, ...session.answers }
+        const constraints = constraintsToBackend(target.plan.constraints)
         const job = await post<BackendJob>(`/api/skills/${encodeURIComponent(target.plan.skill.id)}/runs`, {
-          url: target.url, arguments: target.plan.variables, choices: target.plan.choices,
+          url: target.url, arguments: target.plan.variables,
+          ...(Object.keys(choices).length ? { choices } : {}), ...(constraints ? { constraints } : {}),
         })
         session.jobs.add(job.job_id)
         if (signal.aborted) { await cancel(job.job_id); throw abortError() }
         emit({ type: 'target_start', targetId: target.id, totalSteps: target.plan.skill.steps.length })
         const seen: { lastUrl?: string } = {}
-        const final = await followRunJob(job, signal, target.plan.skill, emit, target.id, target.plan.variables, seen)
+        const final = await followRunJob(job, signal, target.plan.skill, emit, target.id, target.plan.variables, seen, session.asking)
+        session.asking.delete(target.id)
         if (final.status === 'cancelled') throw abortError()
         const result = final.result
         const status = final.status === 'done' ? 'ok' : final.status === 'needs_human' ? 'needs_human' : 'failed'
         // Agent errors live in result.error; service failures such as a timeout in job.error.
         const detail = result?.error || final.error?.message || ''
-        const note = detail ? describeError(detail) : ''
+        const note = detail ? describeError(detail) : result?.note ? `${result.note[0].toUpperCase()}${result.note.slice(1)}` : ''
+        const items = itemsOf(final)
+        const wanted = target.plan.constraints?.items ?? 1
         if (result?.screenshot) emit({ type: 'frame', targetId: target.id, image: new URL(result.screenshot, base).href, final: true })
         emit({ type: 'target_done', targetId: target.id, status, result: {
           Site: target.name, Status: label(final.status),
-          ...Object.fromEntries(Object.entries(result?.outputs ?? {}).map(([key, value]) => [key, cell(value)])),
-        }, message: note || undefined, detail: detail || undefined })
+          ...cells(Object.fromEntries(Object.entries(result?.outputs ?? {}).filter(([key]) => key !== 'items'))),
+          ...(wanted > 1 ? { Items: `${items.length} of ${wanted}` } : {}),
+        }, message: note || undefined, detail: detail || undefined, items: items.length ? items.map(cells) : undefined })
         return { target, job: final, lastUrl: seen.lastUrl, note }
       }
-      // The first site runs alone (it warms the cache and surfaces problems early);
-      // the rest share a pool of up to MAX_PARALLEL browsers, each in its own window.
+      // The first site runs alone (it warms the cache, surfaces problems early and its answers,
+      // e.g. a colour, are reused by the rest); the others share a pool of up to MAX_PARALLEL browsers.
       const results: TargetResult[] = new Array(targets.length)
       results[0] = await runTarget(targets[0])
       let next = 1
@@ -189,23 +215,29 @@ export function createHttpApi(baseUrl: string): AgentApi {
         }
       }
       await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL, targets.length - 1) }, worker))
-      // One row per site, with only the columns the backend actually returned.
-      const outputKeys = [...new Set(results.flatMap(({ job }) => Object.keys(job.result?.outputs ?? {})))]
+      // One row per site (or per product, when several were asked for), with only the columns the backend returned.
+      const outputKeys = [...new Set(results.flatMap(({ job }) => [...Object.keys(job.result?.outputs ?? {}), ...itemsOf(job).flatMap(Object.keys)]))]
+      const showItem = results.some(({ job }) => itemsOf(job).length > 1)
       const showPage = !outputKeys.includes('product_url') && results.some(({ lastUrl }) => lastUrl)
       const showNotes = results.some(({ note }) => note)
-      const columns = ['Site', 'Status', ...outputKeys, ...(showPage ? ['Final page'] : []), ...(showNotes ? ['Notes'] : [])]
-      const rows = results.map(({ target, job, lastUrl, note }) => [target.name, label(job.status),
-        ...outputKeys.map((key) => cell(job.result?.outputs?.[key])),
-        ...(showPage ? [lastUrl ?? '—'] : []), ...(showNotes ? [note || '—'] : [])])
-      // "Log it in my sheet": the backend types one row per site into the Google Sheet.
+      const columns = ['Site', 'Status', ...(showItem ? ['Item'] : []), ...outputKeys, ...(showPage ? ['Final page'] : []), ...(showNotes ? ['Notes'] : [])]
+      const rows = results.flatMap(({ target, job, lastUrl, note }) => {
+        const products = itemsOf(job)
+        return (products.length ? products : [{}]).map((product, index) => [target.name, label(job.status),
+          ...(showItem ? [products.length ? `${index + 1} of ${products.length}` : '—'] : []),
+          ...outputKeys.map((key) => cell(key in product ? product[key] : job.result?.outputs?.[key])),
+          ...(showPage ? [lastUrl ?? '—'] : []), ...(showNotes ? [index === 0 ? note || '—' : ''] : [])])
+      })
+      // "Log it in my sheet": the backend types one row per site (per product, when several) into the Google Sheet.
       const sheetUrl = plans.find((plan) => plan.sheetUrl)?.sheetUrl
       let sheetNote = ''
       if (sheetUrl && !signal.aborted) {
         const text = (value: unknown) => value == null ? '' : typeof value === 'string' ? value : String(value)
-        const sheetRows = results.map(({ target, job, note }) => {
+        const sheetRows = results.flatMap(({ target, job, note }) => {
           const outputs = job.result?.outputs ?? {}
-          return [target.name, text(outputs.product_name), text(outputs.price),
-            job.status === 'done' ? text(outputs.product_url) : '', label(job.status), note]
+          const products = itemsOf(job)
+          return (products.length ? products : [outputs]).map((product) => [target.name, text(product.product_name), text(product.price),
+            job.status === 'done' ? text(product.product_url) : '', label(job.status), note])
         })
         emit({ type: 'log', level: 'info', ts: new Date().toISOString(), message: `Writing ${sheetRows.length} rows to your Google Sheet…` })
         try {
@@ -217,10 +249,12 @@ export function createHttpApi(baseUrl: string): AgentApi {
         }
       }
       const completed = results.filter(({ job }) => job.status === 'done').length
+      const basket = results.reduce((n, { job }) => n + (job.status === 'done' ? itemsOf(job).length : 0), 0)
+      const itemsText = basket > 1 ? ` ${basket} different items in baskets.` : ''
       const outcome = results.some(({ job }) => job.status === 'needs_human') ? 'needs_human' : completed < results.length ? 'failed' : 'done'
       emit({ type: 'done', status: outcome, summary: (outcome === 'done' ? `Completed ${results.length} ${results.length === 1 ? 'site' : 'sites'}.` :
         outcome === 'needs_human' ? `${completed} of ${results.length} sites completed. The agent needs your attention on the rest.` :
-        `${completed} of ${results.length} sites completed. Check the site details and activity.`) + sheetNote,
+        `${completed} of ${results.length} sites completed. Check the site details and activity.`) + itemsText + sheetNote,
         table: { columns, rows } })
     } catch (error) {
       await Promise.allSettled([...session.jobs].map(cancel))
@@ -278,8 +312,18 @@ export function createHttpApi(baseUrl: string): AgentApi {
     async startRun({ skillIds, prompt }) {
       if (!skillIds.length) throw new Error('Choose a skill first.')
       const first = await post<BackendJob>(`/api/skills/${encodeURIComponent(skillIds[0])}/plans`, { prompt })
-      runs.set(first.job_id, { first, skillIds, prompt, jobs: new Set([first.job_id]), controller: new AbortController(), started: false })
+      runs.set(first.job_id, { first, skillIds, prompt, jobs: new Set([first.job_id]), controller: new AbortController(), started: false,
+        answers: {}, asking: new Map() })
       return { runId: first.job_id }
+    },
+    async answerTarget(runId, targetId, value) {
+      const session = runs.get(runId)
+      const pending = session?.asking.get(targetId)
+      if (!session || !pending) throw new Error('The agent is no longer waiting for this answer.')
+      await post<BackendJob>(`/api/jobs/${encodeURIComponent(pending.jobId)}/answer`, { field: pending.field, value })
+      // Sizes differ from site to site (UK 14 / EU 42 / W30): each site and product asks for its own.
+      if (!perItemChoice(pending.field)) session.answers[pending.field] = value.trim()
+      session.asking.delete(targetId)
     },
     onRunEvents(id, callback) {
       const session = runs.get(id)

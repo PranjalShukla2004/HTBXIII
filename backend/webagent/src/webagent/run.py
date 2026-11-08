@@ -8,11 +8,12 @@ from .config import DATA
 from .llm import llm_json, stats
 from .page import (describe_page, format_elements, act, act_on, resolve_locator,
                    settle, page_text, dismiss_overlays, click_text, cart_signals)
-from .schemas import IntentProgram, SiteResult, Binding, AgentEvent
+from .schemas import IntentProgram, SiteResult, Binding, AgentEvent, Constraints
 
 MAX_HOPS = 3
 MAX_REPEAT = 20
 MAX_ASKS = 3
+MAX_PICKS = 4            # products rejected (over budget / wrong) before giving up on one item
 PAGE_CHANGING = {"search", "click", "press", "click_text"}
 CACHE_KEYS = ("tag", "type", "label", "aria", "ph", "name", "text", "href")
 QTY_VAR = re.compile(r"qty|quantit", re.I)
@@ -22,6 +23,21 @@ SHOP_WORDS = re.compile(r"\b(cart|basket|bag|trolley)\b", re.I)
 def is_shopping(program: "IntentProgram") -> bool:
     """Basket checks, sizes and quantities only make sense for add-to-basket skills."""
     return any(SHOP_WORDS.search(s.target or "") for s in program.steps)
+
+PRODUCT_WORDS = re.compile(r"\b(product|item|result|match|listing|tile)", re.I)
+CART_WORDS = re.compile(r"\b(cart|basket|bag|trolley|checkout)\b", re.I)
+ADD_STEP = re.compile(r"\badd\b.*\b(cart|basket|bag|trolley)\b|\bbuy\b", re.I)
+ADD_EL = re.compile(r"\b(add|buy)\b", re.I)
+MAX_ASKS_PER_FIELD = 2   # per product: a second answer is allowed (e.g. the first size was sold out)
+# Answers to these hold for ONE product on ONE shop: sizes are labelled differently from shop to
+# shop (UK 14 / EU 42 / W30 L32 / M) and product to product, so the next product asks again.
+PER_ITEM_FIELD = re.compile(r"size|waist|length|leg|inseam|cup|width|fit", re.I)
+CURRENCIES = (("us$", "USD"), ("£", "GBP"), ("€", "EUR"), ("₹", "INR"), ("$", "USD"))
+CURRENCY_WORDS = re.compile(r"\b(gbp|usd|eur|inr|rs|pounds?|dollars?|euros?|rupees?)\b", re.I)
+CURRENCY_CODES = {"gbp": "GBP", "pound": "GBP", "pounds": "GBP", "usd": "USD", "dollar": "USD",
+                  "dollars": "USD", "eur": "EUR", "euro": "EUR", "euros": "EUR", "inr": "INR",
+                  "rs": "INR", "rupee": "INR", "rupees": "INR"}
+SYMBOL = {"GBP": "£", "USD": "$", "EUR": "€", "INR": "₹"}
 
 AskFn = Callable[[str, str, list[str]], Awaitable[Optional[str]]]
 
@@ -111,10 +127,19 @@ Rules:
   (needs_input) if no available option is reasonably close.
 - USER CHOICES can also be constraints such as max_price, budget, brand or colour: when
   choosing a product, pick one that satisfies them (compare the prices shown in ctx). If
-  none does, pick the closest and say so in "reason".
+  none does, pick the closest and say so in "reason" (but when SHOPPER WANTS is given, it is
+  checked strictly: follow the SHOPPER WANTS rule below instead).
 - The add-to-basket step only makes sense on a single product's page. If you are on a home,
   search or category page instead, return "move" with the product that best matches the
   item (and USER CHOICES) to open its page.
+- A value shown as <name: not chosen> is a personal choice the shopper has NOT made. Never
+  pick it yourself: if the page requires it (options visible), return needs_input with those
+  options; if this shop doesn't need it, the step is not_found (it is optional).
+- If SHOPPER WANTS is given, a product you choose must fit it: judge each product by its
+  text and ctx (price, name, description) and pick one that is within the price limit and
+  meets every requirement. Never pick a product listed under ALREADY CHOSEN or REJECTED. If
+  no visible product fits, use the shop's sort-by-price or filter control if there is one
+  (status partial), otherwise return not_found with the reason.
 - If a NOTE is given, follow it: it explains what went wrong on the previous attempt.
 - Match by meaning: "Add to basket", "Add to bag", "Add", "Buy" (on a product page) all
   mean add to cart.
@@ -173,6 +198,110 @@ def _qty_target(step, vars_: dict) -> int:
                 return 1
     return 1
 
+# ---------- products, prices and the shopper's constraints ----------
+def product_step(program: IntentProgram) -> Optional[int]:
+    """The step that chooses which product to buy (e.g. 'the product that best matches {{query}}')."""
+    steps = program.steps
+    search = next((k for k, s in enumerate(steps) if s.op == "search"), None)
+    clicks = [k for k, s in enumerate(steps)
+              if s.op == "click" and not s.optional and not CART_WORDS.search(s.target)]
+    for found in ([k for k in clicks if PRODUCT_WORDS.search(steps[k].target)],
+                  [k for k in clicks if "{{" in steps[k].target]):
+        after = [k for k in found if search is None or k > search]
+        if after:
+            return after[0] if search is not None else after[-1]
+    return None
+
+def currency_of(text: Optional[str]) -> Optional[str]:
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if t.upper() in SYMBOL:
+        return t.upper()
+    for sym, code in CURRENCIES:
+        if sym in t:
+            return code
+    m = CURRENCY_WORDS.search(t)
+    return CURRENCY_CODES.get(m.group(1).lower()) if m else None
+
+def parse_price(text) -> tuple[Optional[float], Optional[str]]:
+    """'£24.99' -> (24.99, 'GBP'); '1.299,00 €' -> (1299.0, 'EUR'); 'Rs. 500' -> (500.0, 'INR')."""
+    if text is None:
+        return None, None
+    s = str(text)
+    m = re.search(r"\d[\d.,\s]*\d|\d", s)
+    if not m:
+        return None, currency_of(s)
+    tok = re.sub(r"\s", "", m.group(0))
+    if "," in tok and "." in tok:
+        dec = "," if tok.rfind(",") > tok.rfind(".") else "."
+        tok = tok.replace("." if dec == "," else ",", "").replace(dec, ".")
+    elif "," in tok:
+        tok = tok.replace(",", ".") if re.fullmatch(r"\d+,\d{1,2}", tok) else tok.replace(",", "")
+    elif re.fullmatch(r"\d{1,3}(\.\d{3})+", tok):
+        tok = tok.replace(".", "")               # 1.299 -> 1299 (thousands separator)
+    try:
+        return float(tok), currency_of(s)
+    except ValueError:
+        return None, currency_of(s)
+
+def money(amount: float, currency: Optional[str]) -> str:
+    sym = SYMBOL.get(currency or "", "")
+    text = f"{amount:,.2f}".replace(".00", "")
+    return f"{sym}{text}" if sym else (f"{text} {currency}" if currency else text)
+
+def wants_text(c: Constraints, left: Optional[float], currency: Optional[str]) -> str:
+    """left: each remaining item's share of the total budget, if there is one."""
+    parts = []
+    if c.max_price is not None:
+        parts.append(f"priced at most {money(c.max_price, currency)} each")
+    if c.total_budget is not None and left is not None:
+        parts.append(f"costing at most {money(max(left, 0), currency)} each "
+                     f"(an equal share of what's left of the {money(c.total_budget, currency)} total budget)")
+    if c.requirements:
+        parts.append("must be: " + ", ".join(c.requirements))
+    return "; ".join(parts)
+
+async def product_details(page: Page, c: Constraints, wanted: str = "") -> dict:
+    fields = {"product_name": "the main product's name (null if this is not a single product's page, "
+                              "e.g. a list of search results)",
+              "price": "the main product's current selling price with its currency symbol, exactly "
+                       "as shown (the sale price if it is discounted)"}
+    if wanted:
+        fields["is_requested_kind"] = (f"'yes' or 'no': is the main product the kind of item asked for "
+                                       f"({wanted})? Answer 'no' only if it is clearly a different kind "
+                                       f"of product (e.g. a top when jeans were asked for).")
+    if c.requirements:
+        fields["meets_requirements"] = ("'yes' or 'no': does this product satisfy ALL of: "
+                                        + "; ".join(c.requirements)
+                                        + "? Answer 'yes' if the page doesn't say otherwise.")
+    vals = await extract(page, fields)
+    vals["product_url"] = page.url
+    return vals
+
+def _norm_option(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s)).strip().lower()
+
+def closest_option(answer: Optional[str], options: list[str]) -> Optional[str]:
+    """The visible option that means the shopper's answer: '12' -> 'UK 12', 'M' -> 'M (UK 10)'."""
+    a = _norm_option(answer or "")
+    if not a:
+        return None
+    opts = [o for o in options if str(o).strip()]
+    for o in opts:
+        if _norm_option(o) == a:
+            return o
+    token = re.compile(rf"(^|[^a-z0-9]){re.escape(a)}([^a-z0-9]|$)")
+    return next((o for o in opts if token.search(_norm_option(o))), None)
+
+def basket_state(signals: list[str]) -> tuple:
+    """Numbers on the basket/bag/cart labels, plus whether an 'added' message shows. Compared before
+    and after a click to tell whether it put something in the basket (old items don't count)."""
+    counts = sorted(int(n) for s in signals if len(s) < 80 and CART_WORDS.search(s)
+                    for n in re.findall(r"\d+", s)[:1])
+    added = any(re.search(r"\badded\b|\bin (your|the) (bag|basket|cart)\b", s, re.I) for s in signals)
+    return tuple(counts), added
+
 # ---------- cache ----------
 def cache_path(program: IntentProgram, url: str):
     key = hashlib.sha1(program.model_dump_json().encode()).hexdigest()[:10]
@@ -189,7 +318,10 @@ def cacheable(step, acts: list[dict]) -> bool:
     """Replayable only if the step doesn't depend on the item or on a user's answer."""
     return ("{{" not in step.target
             and not any(a["action"] == "click" and a.get("repeat", 1) > 1 for a in acts)
-            and not any(a.get("answer") or not a.get("locator") for a in acts))
+            and not any(a.get("answer") or not a.get("locator") for a in acts)
+            # text typed during a step that has no value of its own (e.g. a search done while
+            # 'going to the home page') came from that run's inputs: don't replay it for another
+            and not (step.value is None and any(a["action"] in ("fill", "search", "select") for a in acts)))
 
 async def replay_step(page: Page, acts: list[dict], value: Optional[str], *,
                       on_action: Optional[Callable[[dict], None]] = None) -> bool:
@@ -223,21 +355,31 @@ async def replay_step(page: Page, acts: list[dict], value: Optional[str], *,
 
 # ---------- LLM helpers ----------
 async def ground(page: Page, program: IntentProgram, window: list[int], vars_: dict,
-                 els: list[dict], *, answers: Optional[dict] = None, hint: str = "") -> list[dict]:
+                 els: list[dict], *, answers: Optional[dict] = None, hint: str = "",
+                 shopper: str = "", avoid: Optional[list[str]] = None,
+                 rejected: Optional[list[str]] = None) -> list[dict]:
+    # Personal choices the shopper hasn't made are shown as such, never as an empty value.
+    shown = {**vars_, **{k: f"<{k}: not chosen>" for k, v in vars_.items() if str(v).strip() == ""}}
     lines = []
     for k in window:
         s = program.steps[k]
-        v = render(s.value, vars_)
-        lines.append(f"[{k}] {s.op}: {render(s.target, vars_)}"
+        v = render(s.value, shown)
+        lines.append(f"[{k}] {s.op}: {render(s.target, shown)}"
                      + (f"  value={v}" if v else "") + ("  (optional)" if s.optional else ""))
     extra = ""
     if answers:
         extra += ("USER CHOICES (already answered by the shopper; use them, don't ask again): "
                   + ", ".join(f"{k}={v}" for k, v in answers.items()) + "\n")
+    if shopper:
+        extra += f"SHOPPER WANTS: products {shopper}\n"
+    if avoid:
+        extra += "ALREADY CHOSEN (pick a DIFFERENT product): " + "; ".join(avoid) + "\n"
+    if rejected:
+        extra += "REJECTED (don't pick these again): " + "; ".join(rejected) + "\n"
     if hint:
         extra += f"NOTE: {hint}\n"
     u = urlparse(page.url)
-    user = (f"OVERALL GOAL: {render(program.goal, vars_)}\n\n"
+    user = (f"OVERALL GOAL: {render(program.goal, shown)}\n\n"
             + (extra + "\n" if extra else "")
             + "REMAINING STEPS (start with the first):\n" + "\n".join(lines) + "\n\n"
             f"PAGE: title={await page.title()!r} path={u.path}{'?' + u.query if u.query else ''}\n"
@@ -307,11 +449,17 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                       page: Optional[Page] = None,
                       run_tag: Optional[str] = None,
                       ask: Optional[AskFn] = None,
-                      answers: Optional[dict] = None) -> SiteResult:
+                      answers: Optional[dict] = None,
+                      constraints: Optional[Constraints | dict] = None) -> SiteResult:
     """ask(field, question, options) -> answer or None. answers: shared dict of the shopper's
-    choices (e.g. {"size": "M"}); pass the same dict to every shop in a run to ask only once."""
+    choices (e.g. {"colour": "blue"}); pass the same dict to every shop in a run to ask only once.
+    Answers about sizes (PER_ITEM_FIELD) are not shared: they hold for the current product only.
+    constraints: budget, number of DIFFERENT products and requirements (see schemas.Constraints);
+    without them the run behaves exactly as before."""
     answers = answers if answers is not None else {}
-    vars_ = {**program.variables, **(variables or {}), **answers}
+    base_vars = {**program.variables, **(variables or {})}
+    vars_ = {**base_vars, **answers}
+    item_answers: dict[str, str] = {}   # answers that hold for the current product only (e.g. size)
     steps = program.steps
     verify_idx = [k for k, s in enumerate(steps) if s.op == "verify"]
     final_verify = verify_idx[-1] if verify_idx else None
@@ -329,6 +477,25 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
     last_partial: dict[int, str] = {}
     guards: dict[int, int] = {}
 
+    # ---- the shopper's constraints: budget, how many different products, requirements ----
+    c = constraints if isinstance(constraints, Constraints) else Constraints.model_validate(constraints or {})
+    prod_step = product_step(program) if shopping else None    # email/other skills: no products
+    pick = prod_step if c.active() else None
+    checking = pick is not None                 # check each chosen product before buying it
+    wanted_kind = render(steps[pick].target, vars_) if checking else ""
+    budget_cur = currency_of(c.currency)
+    qty_wanted = max([_qty_target(s, vars_) for s in steps] or [1])
+    # The skill's "add to basket" click: on some shops (Zara) choosing a size already adds the item,
+    # so before that step runs we check whether an earlier click already put it in the basket.
+    add_click = next((k for k, s in enumerate(steps)
+                      if shopping and s.op == "click" and k > (prod_step if prod_step is not None else -1)
+                      and ADD_STEP.search(s.target)), None)
+    items: list[dict] = []                      # products that made it into the basket
+    rejected: list[str] = []
+    notes: list[str] = []
+    state = {"current": None, "checked": False, "rejected_now": 0, "spent": 0.0, "results_url": None,
+             "asked": {}, "pre_added": False, "basket_before": None}
+
     def emit(kind, message, **data):
         if on_event:
             on_event(AgentEvent(kind=kind, site=url, message=message, data=data))
@@ -342,6 +509,110 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
         emit("log", log, step=i)
         return True
 
+    def share() -> Optional[float]:
+        """Per-item allowance from a total budget: an equal share of what's left, so the first
+        product can't use up the money the others need."""
+        if c.total_budget is None:
+            return None
+        return (c.total_budget - state["spent"]) / max(c.items - len(items), 1) / qty_wanted
+
+    def cap_now() -> Optional[float]:
+        caps = [x for x in (c.max_price, share()) if x is not None]
+        return min(caps) if caps else None
+
+    def shopper_text() -> str:
+        return wants_text(c, share(), budget_cur) if checking else ""
+
+    def save_cache():
+        try:
+            cache_path(program, url).write_text(
+                json.dumps({str(k): v for k, v in performed.items()}, indent=1))
+        except Exception:
+            pass
+
+    async def back_to_results():
+        target = state["results_url"]
+        if target and page.url != target:
+            await page.goto(target, wait_until="domcontentloaded")
+        elif target:
+            await dismiss_overlays(page, aggressive=True)   # a quick-view popup over the results
+        else:
+            await page.go_back(wait_until="domcontentloaded")
+        await settle(page)
+        await dismiss_overlays(page)
+
+    async def check_product() -> bool:
+        """Read the chosen product's name and price; False (and back to the results) if it doesn't fit."""
+        details = {k: v for k, v in (await product_details(page, c, wanted_kind)).items() if v not in (None, "")}
+        if not details.get("product_name") and not details.get("price"):
+            # Still on a list of products (e.g. it searched again instead of opening one).
+            state["rejected_now"] += 1
+            if state["rejected_now"] >= MAX_PICKS:
+                raise StepFailed(f"couldn't open a product page after {MAX_PICKS} tries")
+            step_hint[pick] = ("No product page is open yet. Click ONE product (its name, picture or "
+                               "'View Product' link) to open its own page; don't search again.")
+            emit("log", "no product page open yet; choosing a product", step=pick)
+            if state["results_url"] and page.url != state["results_url"]:
+                await back_to_results()
+            return False
+        name = str(details.get("product_name") or "this product").strip()
+        label = f"{name} ({details['price']})" if details.get("price") else name
+        amount, cur = parse_price(details.get("price"))
+        limit_cur = budget_cur or cur
+        problem = ""
+        kind = str(details.pop("is_requested_kind", "")).strip().lower()
+        meets = str(details.pop("meets_requirements", "")).strip().lower()
+        bare = lambda u: urlparse(str(u))._replace(query="", fragment="").geturl()
+        if any(bare(it.get("product_url", "")) == bare(page.url)
+               or _norm_option(it.get("product_name", "")) == _norm_option(name) for it in items):
+            problem = "it is already in the basket"
+        elif kind.startswith("no"):
+            problem = f"it isn't what was asked for ({wanted_kind})"
+        elif c.max_price is not None or c.total_budget is not None:
+            if amount is None:
+                notes.append(f"couldn't read the price of {name}, so its budget wasn't checked")
+            elif budget_cur and cur and cur != budget_cur:
+                notes.append(f"prices here are in {cur} and the budget is in {budget_cur}, so they weren't compared")
+            elif c.max_price is not None and amount > c.max_price + 1e-9:
+                problem = f"{money(amount, cur)} is over the {money(c.max_price, limit_cur)} limit"
+            elif c.total_budget is not None and amount > share() + 1e-9:
+                problem = (f"{money(amount, cur)} is more than its share of the "
+                           f"{money(c.total_budget, limit_cur)} total budget ({money(max(share(), 0), limit_cur)})")
+        if not problem and meets.startswith("no"):
+            problem = "doesn't match " + ", ".join(c.requirements)
+        if problem:
+            rejected.append(f"{label}: {problem}")
+            state["rejected_now"] += 1
+            emit("log", f"product rejected: {label} - {problem}", item=details, reason=problem)
+            if state["rejected_now"] >= MAX_PICKS:
+                raise StepFailed(f"no product fits ({shopper_text()}) after {MAX_PICKS} tries; "
+                                 f"last: {label} - {problem}")
+            performed.pop(pick, None)               # don't cache the rejected click
+            await back_to_results()
+            step_hint.pop(pick, None)               # the hint was about the page just left
+            return False
+        state["current"] = details
+        within = f" - within {money(cap_now(), limit_cur)}" if amount is not None and cap_now() is not None else ""
+        emit("log", f"product check passed: {label}{within}", item=details)
+        return True
+
+    def stop_for_person(reason: str, **data) -> SiteResult:
+        """The site needs a person. Products already in the basket still count: report them as done."""
+        if items:
+            result.status = "done"
+            notes.insert(0, f"added {len(items)} of {c.items} items; then the site needed you: {reason}")
+            save_cache()
+            emit("log", f"stopped looking after {len(items)} of {c.items} items: {reason}")
+            emit("status", "done")
+        else:
+            result.status, result.error = "needs_human", reason
+            emit("status", "needs_human", reason=reason, **data)
+        return result
+
+    def looks_like_add(el: Optional[dict], text: str = "") -> bool:
+        label = " ".join(str((el or {}).get(k, "")) for k in ("text", "aria", "title", "label")) + " " + text
+        return bool(ADD_EL.search(label))
+
     own_page = page is None
     if own_page:
         page = await ctx.new_page()
@@ -352,6 +623,13 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
         await dismiss_overlays(page)
         result.status = "acting"
         emit("status", "acting", cached=bool(cache))
+        if checking:
+            emit("log", f"looking for {c.items} different product{'s' if c.items > 1 else ''}"
+                        + (f" {shopper_text()}" if shopper_text() else ""),
+                 items_wanted=c.items, constraints=c.model_dump())
+        elif c.active():
+            notes.append("this skill has no product-choosing step, so the budget and item count weren't applied")
+            emit("log", notes[-1])
 
         i, hops, last_reason = 0, 0, ""
         hint, cart_checked, cart_retries, extra_adds, repeating, asks = "", False, 0, 0, False, 0
@@ -360,6 +638,28 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
             while i < len(steps):
                 if repeating and i > add_step:
                     break                                   # extra adds: only redo add-to-basket
+                if checking and i == pick and state["results_url"] is None:
+                    state["results_url"] = page.url         # where to come back for another product
+                if checking and not state["checked"] and not repeating and i > pick:
+                    state["checked"] = True
+                    if not await check_product():
+                        state["checked"] = False
+                        i, hops = pick, 0
+                        continue
+                if (add_click is not None and not repeating and state["basket_before"] is None
+                        and (prod_step is None or i > prod_step) and i <= add_click):
+                    state["basket_before"] = basket_state(await cart_signals(page))   # before any add
+                if i == add_click and state["pre_added"] and not repeating:
+                    # An earlier step clicked an add button (e.g. Zara adds when you pick a size):
+                    # if the basket changed since the product page opened, don't add it twice.
+                    state["pre_added"] = False
+                    now = basket_state(await cart_signals(page))
+                    before = state["basket_before"]
+                    if before is not None and (now[0] != before[0] or (now[1] and not before[1])):
+                        emit("step", f"[{i}] {steps[i].op} -> already_done [None] the earlier click already "
+                                     f"put it in the basket, so it isn't added twice", step=i)
+                        i, hops = i + 1, 0
+                        continue
                 step = steps[i]
 
                 if step.op == "extract":
@@ -395,6 +695,8 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
 
                 # ---- fast path: replay (from cache, or the add that just worked when repeating) ----
                 acts = cache.get(str(i))
+                if checking and i == pick and (items or rejected):
+                    acts = None                             # another product: never replay the old click
                 # Adding to basket depends on this run's size/colour, so it is never replayed
                 # from an earlier run's cache (only repeated within this run, below).
                 replayable = acts is not None and cacheable(step, acts) and i != add_step
@@ -405,7 +707,11 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                     callback = (lambda a: on_action({"step": i, "target": render(step.target, vars_), **a})) \
                         if on_action else None
                     if await replay_step(page, acts, render(step.value, vars_), on_action=callback):
-                        if not repeating:
+                        if (add_click is not None and i < add_click and not repeating
+                                and any(looks_like_add(a.get("locator"), a.get("value") or "" if a["action"] == "click_text" else "")
+                                        for a in acts)):
+                            state["pre_added"] = True
+                        if not repeating and not items:
                             performed[i] = acts
                         emit("step", f"[{i}] {step.op} replayed from cache", step=i, cached=True)
                         i, hops = i + 1, 0
@@ -420,13 +726,20 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
 
                 await dismiss_overlays(page)
                 els = await describe_page(page)
-                actions = await ground(page, program, window, vars_, els, answers=answers,
-                                       hint=" ".join(h for h in (hint, step_hint.get(i, "")) if h))
+                actions = await ground(page, program, window, vars_, els, answers={**answers, **item_answers},
+                                       hint=" ".join(h for h in (hint, step_hint.get(i, "")) if h),
+                                       shopper=shopper_text(),
+                                       avoid=[str(it.get("product_name") or it.get("product_url")) for it in items],
+                                       rejected=rejected[-6:])
                 if not actions:
                     actions = [{"step": i, "status": "not_found", "reason": "empty plan"}]
                 start_i, replan = i, False
 
                 for n, a in enumerate(actions):
+                    if checking and not state["checked"] and not repeating and i > pick:
+                        break                               # check the chosen product before going on
+                    if checking and i == pick and state["results_url"] is None:
+                        state["results_url"] = page.url
                     s = _step_index(a, i)
                     if s != i:
                         if n == 0:
@@ -444,6 +757,8 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                                 and SEARCHY.search(" ".join(str(el.get(k, "")) for k in
                                                             ("text", "aria", "title", "ph", "name", "href", "label"))):
                             status = "partial"                  # search icon click only opened the box
+                    if checking and i == pick and status == "ok" and action not in ("click", "click_text"):
+                        status = "partial"                      # searching/filtering again doesn't choose a product
                     text_click = action == "click_text" and bool(a.get("value"))
                     repeat = max(1, min(int(a.get("repeat") or 1), MAX_REPEAT))
                     last_reason = a.get("reason", "")
@@ -475,7 +790,38 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         field = re.sub(r"\W+", "_", str(a.get("field") or "choice").lower()).strip("_") or "choice"
                         question = a.get("question") or f"Which {field.replace('_', ' ')} would you like?"
                         options = [str(o) for o in (a.get("options") or [])][:40]
-                        known = answers.get(field)
+                        # a choice from the chat (e.g. size=M as a skill input) is as good as an answer
+                        known = (item_answers.get(field) or answers.get(field)
+                                 or str(vars_.get(field) or "").strip() or None)
+                        label = field.replace("_", " ")
+                        match = closest_option(known, options) if known and options else None
+                        if match:
+                            # The shopper's answer is on the page: pick it ourselves, never ask again.
+                            try:
+                                await click_text(page, match)
+                            except Exception as e:
+                                emit("log", f"couldn't click the {label} option {match!r}: {e}", step=i)
+                            else:
+                                await settle(page)
+                                if on_action:
+                                    on_action({"step": i, "op": "click_text", "target": render(steps[i].target, vars_),
+                                               "value": match, "element": {"text": match}, "url": page.url,
+                                               "cached": False, "repeat": 1, "repetition": 1,
+                                               "navigation_hop": False, "partial": False})
+                                answered_steps.add(i)
+                                if not repeating and not items:
+                                    performed.setdefault(i, []).append(
+                                        {"action": "click_text", "locator": {}, "value": match, "repeat": 1,
+                                         "status": "ok", "answer": True})
+                                emit("log", f"picked {label} {match!r} for your answer {known!r}", step=i)
+                                if add_click is not None and i < add_click:
+                                    i, hops = i + 1, 0          # the option step is done
+                                else:
+                                    step_hint[i] = (f"{label} {match} is selected now. If the item is not in the "
+                                                    f"basket yet, click add-to-basket; if it is (confirmation shown, "
+                                                    f"basket count went up), return already_done.")
+                                    replan = True
+                                break
                         if (not options or known) and nudge(
                                 i,
                                 (f"The shopper already chose {field} = {known}. Click the visible {field} "
@@ -488,39 +834,55 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                                 f"not asking about {field} yet; trying the page first"):
                             replan = True
                             break
-                        asks += 1
-                        if ask is None or asks > MAX_ASKS:
-                            listed = f" Options: {', '.join(options)}." if options else ""
-                            result.status, result.error = "needs_human", (
-                                f"{question}{listed} Add it to your request "
-                                f"(e.g. \"{field.replace('_', ' ')} {options[0] if options else '10'}\") and run again.")
-                            emit("status", "needs_human", reason=question, field=field, options=options)
-                            return result
-                        emit("status", "needs_input", field=field, question=question,
-                             options=options, step=i)
-                        answer = await ask(field, question, options)
-                        if not answer:
-                            result.status, result.error = "needs_human", f"no answer to: {question}"
-                            emit("status", "needs_human", reason=result.error)
-                            return result
-                        answers[field] = vars_[field] = answer.strip()
-                        answered_steps.add(i)
-                        step_hint.pop(i, None)
-                        emit("log", f"shopper chose {field} = {answers[field]}", step=i,
-                             answer={field: answers[field]})
-                        replan = True
-                        break                                   # re-plan this step with the answer
+                        # Asking only helps when there is something to choose from (or nothing is known yet).
+                        if not options and steps[i].optional:
+                            emit("log", f"no {label} choices visible at this step; moving on "
+                                        f"(adding to the basket usually shows them)", step=i)
+                            emit("log", f"skipped optional step {i}")
+                            i, hops = i + 1, 0
+                            continue
+                        if not options and known:
+                            status, last_reason = "not_found", f"no {label} choices are visible to pick {known}"
+                        elif state["asked"].get(field, 0) >= MAX_ASKS_PER_FIELD:
+                            status, last_reason = "not_found", f"couldn't choose a {label} on this page after asking"
+                        else:
+                            if known and options:
+                                question = (f"{label.capitalize()} {known} isn't one of the options for this "
+                                            f"product here. Which {label} would you like instead?")
+                            state["asked"][field] = state["asked"].get(field, 0) + 1
+                            asks += 1
+                            if ask is None or asks > MAX_ASKS * c.items:
+                                # Can't ask (CLI without input, or asked too often): say how to give it upfront.
+                                listed = f" Options: {', '.join(options)}." if options else ""
+                                return stop_for_person(
+                                    f"{question}{listed} Add it to your request "
+                                    f"(e.g. \"{field.replace('_', ' ')} {options[0] if options else '10'}\") and run again.",
+                                    field=field, options=options)
+                            emit("status", "needs_input", field=field, question=question,
+                                 options=options, step=i)
+                            answer = await ask(field, question, options)
+                            if not answer:
+                                return stop_for_person(f"no answer to: {question}")
+                            chosen = answer.strip()
+                            per_item = bool(PER_ITEM_FIELD.search(field))
+                            (item_answers if per_item else answers)[field] = vars_[field] = chosen
+                            answered_steps.add(i)
+                            step_hint.pop(i, None)
+                            nudges.pop(i, None)
+                            emit("log", f"shopper chose {field} = {chosen}"
+                                        + (" for this product" if per_item else ""), step=i,
+                                 answer={field: chosen}, per_item=per_item)
+                            replan = True
+                            break                               # re-plan this step with the answer
 
                     if status == "needs_human":
-                        result.status, result.error = "needs_human", last_reason
-                        emit("status", "needs_human", reason=last_reason)
-                        return result
+                        return stop_for_person(last_reason)
                     if status == "already_done":
                         qty = _qty_target(steps[i], vars_)
                         if el is None and qty > 1 and add_step is not None and i < add_step and not repeating:
                             extra_adds = qty - 1          # "no quantity box" said as already_done
                             emit("log", f"no quantity control here; will add to basket {qty} times")
-                        if steps[i].value is None and not repeating:
+                        if steps[i].value is None and not repeating and not items:
                             performed.setdefault(i, [])
                         i, hops = i + 1, 0
                         continue
@@ -578,7 +940,10 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         hops += 1
                         break
                     await settle(page)
-                    if not repeating:
+                    if (add_click is not None and i < add_click and not repeating
+                            and looks_like_add(el, value if text_click else "")):
+                        state["pre_added"] = True           # e.g. the size step clicked ADD to open sizes
+                    if not repeating and not items:         # the cache holds the first product's path
                         rec = {"action": action, "locator": semantic(el), "value": value,
                                "repeat": repeat, "status": status}
                         if i in answered_steps:
@@ -592,6 +957,12 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         if action in PAGE_CHANGING:
                             break
                     else:
+                        if status == "move" and i == prod_step and action in ("click", "click_text"):
+                            # It opened something from the results; if that is the product, this
+                            # step is done (otherwise it starts on the product page's options).
+                            step_hint[i] = ("You just opened a page from the results. If it is a single "
+                                            "product's page, this step is done: return already_done. "
+                                            "Otherwise click ONE matching product.")
                         hops += 1
                         break
 
@@ -627,22 +998,73 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                 emit("log", f"adding another one to the basket ({extra_adds} more after this)")
                 i, hops = add_step, 0
                 continue
+
+            # ---- the shopper wants several DIFFERENT products: go back for the next one ----
+            if checking:
+                item = state["current"] or {"product_url": page.url}
+                items.append(item)
+                amount, _ = parse_price(item.get("price"))
+                state["spent"] += (amount or 0) * qty_wanted
+                name = item.get("product_name") or "the product"
+                emit("log", f"item {len(items)} of {c.items} in the basket: {name}"
+                            + (f" ({item['price']})" if item.get("price") else ""),
+                     item=item, item_no=len(items), items_wanted=c.items)
+                state.update(current=None, checked=False, rejected_now=0, asked={},
+                             pre_added=False, basket_before=None)
+                for f in item_answers:                      # the next product asks for its own size
+                    if f in answers:
+                        vars_[f] = answers[f]
+                    elif f in base_vars:
+                        vars_[f] = base_vars[f]
+                    else:
+                        vars_.pop(f, None)
+                item_answers.clear()
+                if len(items) < c.items:
+                    if c.total_budget is not None and (cap_now() or 0) <= 0:
+                        notes.append(f"the {money(c.total_budget, budget_cur)} total budget is used up")
+                    else:
+                        emit("log", f"looking for item {len(items) + 1} of {c.items}",
+                             item_no=len(items) + 1, items_wanted=c.items)
+                        await back_to_results()
+                        i, hops, hint = pick, 0, ""
+                        cart_checked, cart_retries, extra_adds = False, 0, 0
+                        for d in (nudges, step_hint, last_partial, guards):
+                            d.clear()
+                        continue
             break
 
         result.status = "done"
-        try:
-            cache_path(program, url).write_text(
-                json.dumps({str(k): v for k, v in performed.items()}, indent=1))
-        except Exception:
-            pass
+        if checking and len(items) < c.items:
+            notes.insert(0, f"added {len(items)} of {c.items} items")
+        save_cache()
         emit("status", "done")
     except StepFailed as e:
-        result.status, result.error = "failed", str(e)
-        emit("error", str(e))
+        if items:       # some products are already in the basket: report them, not a failure
+            result.status = "done"
+            notes.insert(0, f"added {len(items)} of {c.items} items; then {e}")
+            save_cache()
+            emit("log", f"stopped looking after {len(items)} of {c.items} items: {e}")
+            emit("status", "done")
+        else:
+            result.status, result.error = "failed", str(e)
+            emit("error", str(e))
     except Exception as e:
-        result.status, result.error = "failed", f"{type(e).__name__}: {e}"
-        emit("error", result.error)
+        if items:
+            result.status = "done"
+            notes.insert(0, f"added {len(items)} of {c.items} items; then {type(e).__name__}: {e}")
+            emit("log", notes[0])
+            emit("status", "done")
+        else:
+            result.status, result.error = "failed", f"{type(e).__name__}: {e}"
+            emit("error", result.error)
     finally:
+        if items:
+            result.items = items
+            for k in ("product_name", "price", "product_url"):
+                if items[0].get(k):
+                    result.outputs.setdefault(k, items[0][k])
+        if notes:
+            result.note = "; ".join(dict.fromkeys(notes))
         name = slug(url) + (f"_{run_tag}" if run_tag else "")
         shot = DATA / "results" / f"{name}.png"
         try:
@@ -659,7 +1081,8 @@ async def run_batch(ctx: BrowserContext, jobs: list[dict], program: IntentProgra
                     on_event: Optional[Callable[[AgentEvent], None]] = None,
                     on_action: Optional[Callable[[dict], None]] = None,
                     on_result=None, concurrency: int = 2,
-                    ask: Optional[AskFn] = None, answers: Optional[dict] = None
+                    ask: Optional[AskFn] = None, answers: Optional[dict] = None,
+                    constraints: Optional[Constraints] = None
                     ) -> list[tuple[dict, SiteResult]]:
     sem = asyncio.Semaphore(concurrency)
     results: list[tuple[dict, SiteResult]] = []
@@ -669,7 +1092,8 @@ async def run_batch(ctx: BrowserContext, jobs: list[dict], program: IntentProgra
         async with sem:
             res = await run_program(ctx, job["url"], program, variables=job.get("variables"),
                                     on_event=on_event, on_action=on_action,
-                                    run_tag=str(job.get("key", "")), ask=ask, answers=answers)
+                                    run_tag=str(job.get("key", "")), ask=ask, answers=answers,
+                                    constraints=constraints)
             results.append((job, res))
             if on_result:
                 await on_result(job, res)

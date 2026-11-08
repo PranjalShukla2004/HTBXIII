@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { api } from './api'
-import type { ActivityItem, RecordedAction, ResultTable, RunEvent, RunTarget, Skill, SkillDraft, Tier } from './api'
+import { perItemChoice } from './api/mapping'
+import type { ActivityItem, RecordedAction, ResultTable, RunConstraints, RunEvent, RunTarget, Skill, SkillDraft, Tier } from './api'
 import { loadStats, saveStats, withRun } from './lib/stats'
 import type { SkillStats } from './lib/stats'
 
@@ -40,6 +41,10 @@ export interface TargetState extends RunTarget {
   attention?: { question: string; options: string[] }
   /** The backend's original error text, kept for inspection. */
   detail?: string
+  /** The site is paused until the shopper answers this (e.g. a size the page asks for). */
+  question?: { field: string; question: string; options: string[]; sending?: boolean; error?: string }
+  /** Different products this site put in the basket, when several were asked for. */
+  items?: Record<string, string | number>[]
 }
 
 export type FocusReason = 'heal' | 'needs' | 'price' | 'live'
@@ -65,8 +70,10 @@ export interface RunState {
   finishedAt?: number
   plan?: string
   variables: Record<string, string>
-  /** Product options the planner read from the message (not sent to runs; see API.md). */
+  /** Product options from the message and the shopper's answers; sent to every site run. */
   choices?: Record<string, string>
+  /** Budget, number of different products and requirements the planner read from the message. */
+  constraints?: RunConstraints
   targets: TargetState[]
   logs: LogLine[]
   heals: { target: string; message: string; phrase?: string }[]
@@ -127,6 +134,8 @@ interface Store {
   pin(msgId: string, targetId: string | null): void
   takeOver(msgId: string, targetId: string): void
   handBack(msgId: string, targetId: string): Promise<void>
+  /** Answer the question a site is waiting on; later sites reuse the answer. */
+  answer(msgId: string, targetId: string, value: string): Promise<void>
   newChat(): void
   dispose(): void
 
@@ -193,8 +202,15 @@ export const useStore = create<Store>((set, get) => {
           plan: e.summary,
           variables: e.variables,
           choices: e.choices,
+          constraints: e.constraints,
           targets: e.targets.map((t, index) => ({ ...t, index, status: 'queued', stepIndex: 0, totalSteps: 0, tiers: [], browserOpen: false, activity: [] })),
         }
+      case 'question':
+        return direct(patchTarget(r, e.targetId, (t) => ({ ...t, question: { field: e.field, question: e.question, options: e.options },
+          currentStep: `Waiting for you: ${e.question}` })), e.targetId, 'needs', 3)
+      case 'answered':
+        return { ...patchTarget(r, e.targetId, (t) => ({ ...t, question: undefined })),
+          choices: e.perItem ? r.choices : { ...r.choices, [e.field]: e.value } }
       case 'activity':
         return patchTarget(r, e.targetId, (t) => t.activity.some((item) => item.id === e.item.id) ? t : ({
           ...t,
@@ -281,6 +297,8 @@ export const useStore = create<Store>((set, get) => {
           stepIndex: e.status === 'ok' ? t.totalSteps : t.stepIndex,
           browserOpen: false,
           detail: e.detail,
+          question: undefined,
+          items: e.items,
           currentStep: e.message ?? (e.status === 'ok' ? 'Finished' : t.currentStep),
           foundAt: e.result ? Date.now() - r.startedAt : undefined,
           evidence: t.evidence ?? t.frame,
@@ -301,7 +319,7 @@ export const useStore = create<Store>((set, get) => {
           status: r.status === 'stopped' || e.stopped ? 'stopped' : 'failed',
           error: e.message,
           finishedAt: Date.now(),
-          targets: r.targets.map((t) => ({ ...t, browserOpen: false,
+          targets: r.targets.map((t) => ({ ...t, browserOpen: false, question: undefined,
             ...(['queued', 'running'].includes(t.status) ? { status: e.stopped || r.status === 'stopped' ? 'stopped' as const : 'failed' as const, currentStep: e.message } : {}) })),
         }
     }
@@ -424,7 +442,7 @@ export const useStore = create<Store>((set, get) => {
     async stopRun(msgId) {
       const msg = get().messages.find((m) => m.id === msgId)
       if (!msg || msg.role !== 'assistant' || msg.kind !== 'run') return
-      patchRun(msgId, (r) => ({ ...r, status: 'stopped', stopping: true, finishedAt: Date.now(), targets: r.targets.map((target) => ({ ...target, browserOpen: false,
+      patchRun(msgId, (r) => ({ ...r, status: 'stopped', stopping: true, finishedAt: Date.now(), targets: r.targets.map((target) => ({ ...target, browserOpen: false, question: undefined,
         ...(['queued', 'running'].includes(target.status) ? { status: 'stopped' as const, currentStep: 'Stopped' } : {}) })) }))
       try { if (msg.run.runId) await api.stopRun(msg.run.runId) }
       finally {
@@ -447,6 +465,22 @@ export const useStore = create<Store>((set, get) => {
       if (!msg || msg.role !== 'assistant' || msg.kind !== 'run' || !msg.run.runId) return
       patchRun(msgId, (r) => ({ ...patchTarget(r, targetId, (t) => ({ ...t, takeover: false, currentStep: 'Handing back to the agent' })), pinned: null }))
       await api.resumeTarget?.(msg.run.runId, targetId)
+    },
+    async answer(msgId, targetId, value) {
+      const msg = get().messages.find((m) => m.id === msgId)
+      if (!msg || msg.role !== 'assistant' || msg.kind !== 'run' || !msg.run.runId || !api.answerTarget || !value.trim()) return
+      const setQuestion = (fn: (q: NonNullable<TargetState['question']>) => TargetState['question']) =>
+        patchRun(msgId, (r) => patchTarget(r, targetId, (t) => (t.question ? { ...t, question: fn(t.question) } : t)))
+      setQuestion((q) => ({ ...q, sending: true, error: undefined }))
+      try {
+        await api.answerTarget(msg.run.runId, targetId, value.trim())
+        const field = msg.run.targets.find((t) => t.id === targetId)?.question?.field
+        patchRun(msgId, (r) => ({ ...patchTarget(r, targetId, (t) => ({ ...t, question: undefined, currentStep: `Carrying on with your answer: ${value.trim()}` })),
+          // A size is for that one product on that one site, so it isn't shown as a choice for the whole run.
+          choices: field && !perItemChoice(field) ? { ...r.choices, [field]: value.trim() } : r.choices }))
+      } catch (error) {
+        setQuestion((q) => ({ ...q, sending: false, error: errText(error) }))
+      }
     },
     newChat() {
       for (const msg of get().messages) {

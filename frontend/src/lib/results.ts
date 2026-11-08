@@ -30,6 +30,15 @@ export function parseMoney(v: unknown): number | undefined {
   return m ? Number(m[0]) : undefined
 }
 
+/** The currency a price is written in: '£24.99' / '29.99 GBP' -> '£', 'Rs. 500' -> '₹'; undefined if it doesn't say. */
+export function currencyOf(v: unknown): string | undefined {
+  const s = String(v ?? '')
+  const symbol = s.match(/[£$€₹]/)?.[0]
+  if (symbol) return symbol
+  const code = s.match(/\b(GBP|USD|EUR|INR|Rs)\b/i)?.[1].toUpperCase()
+  return code ? ({ GBP: '£', USD: '$', EUR: '€', INR: '₹', RS: '₹' } as Record<string, string>)[code] : undefined
+}
+
 export function money(n: number, cur = '£') {
   return cur + n.toLocaleString('en-GB', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })
 }
@@ -45,6 +54,12 @@ export function quantity(run: RunState) {
 
 /** Per-item budget from the skill variables or the request ("under £1000"). */
 export function budgetOf(run: RunState): { amount: number; cur: string } | undefined {
+  // The planner's reading of the message ("under 30 pounds") comes first.
+  const planned = run.constraints?.maxPrice
+  if (planned) {
+    const code = run.constraints?.currency?.toUpperCase()
+    return { amount: planned, cur: code === 'USD' || code === '$' ? '$' : code === 'EUR' || code === '€' ? '€' : '£' }
+  }
   const raw = run.variables.budget ?? run.prompt.match(/(?:under|below|less than|max(?:imum)?|budget(?: of)?|up to)\s*([£$€]\s?\d[\d,]*(?:\.\d+)?)/i)?.[1]
   const amount = parseMoney(raw)
   if (!raw || amount === undefined) return undefined
@@ -66,14 +81,16 @@ export function foundResults(run: RunState): Found[] {
     if (unit === undefined && total === undefined) continue
     unit ??= total! / qty
     total ??= unit * qty
-    const cur = String(unitRaw ?? totalRaw).match(/[£$€]/)?.[0] ?? budget?.cur ?? '£'
+    const stated = currencyOf(unitRaw ?? totalRaw)
+    const cur = stated ?? budget?.cur ?? '£'
     out.push({
       target: t, unit, total, qty, cur,
       product: pick(r, PRODUCT_KEYS)?.toString(),
       delivery: pick(r, DELIVERY_KEYS)?.toString(),
       rating: Number(r.rating) || undefined,
       extras: Object.entries(r).filter(([k, v]) => !HIDDEN.test(k) && v !== '' && v != null).map(([k, v]) => [k.replace(/_/g, ' '), String(v)]),
-      overBudget: budget ? unit > budget.amount : false,
+      // A price in another currency (e.g. Rs. 500 against a £ budget) can't be compared.
+      overBudget: budget && (!stated || stated === budget.cur) ? unit > budget.amount : false,
     })
   }
   // Under budget first, then cheapest.

@@ -39,7 +39,9 @@ Rules:
    The same value typed twice into the same box is ONE step and ONE variable.
    Copied (extracted) values are outputs, not variables.
 3. Choose things the user clicked by their relation to the variables (e.g. the product
-   that best matches {{query}}), not by their literal names.
+   that best matches {{query}}), not by their literal names. Write the product click's target
+   starting with "the product" (e.g. "the product that best matches {{query}}"): the agent
+   uses it to apply the shopper's budget and to pick several different products.
    Email example: click "the button that starts a new email", fill "the recipient (To)
    field" with {{recipient}}, fill "the subject field" with {{subject}}, fill "the message
    body" with {{body}}, click "the button that sends the email", verify "a confirmation
