@@ -47,7 +47,7 @@
   {
     "name": "SauceDemo",
     "url": "https://www.saucedemo.com/",
-    "sells": "demo apparel and accessories: t-shirts, jackets, backpacks, bike lights"
+    "sells": "demo apparel and accessories: t-shirts, jackets, backpacks, bike lights (requires a login)"
   },
   {
     "name": "nopCommerce Demo Store",
@@ -73,5 +73,130 @@
     "name": "ScandiPWA Tech Demo Store",
     "url": "https://tech-demo.scandipwa.com/tech_storeview/",
     "sells": "demo electronics: smartphones, laptops, tablets, headphones, cameras, computers, appliances, accessories"
+  },
+  {
+    "name": "Primark",
+    "url": "https://www.primark.com/en-gb",
+    "sells": "budget clothing for women, men and kids: jeans, t-shirts, jumpers, jackets, nightwear, shoes, accessories, homeware, beauty"
+  },
+  {
+    "name": "New Look",
+    "url": "https://www.newlook.com/uk",
+    "sells": "women's and men's fashion: jeans, dresses, tops, jackets, shoes, bags, accessories"
+  },
+  {
+    "name": "Bershka",
+    "url": "https://www.bershka.com/gb/",
+    "sells": "young fashion for women and men: jeans, trousers, tops, hoodies, jackets, dresses, shoes"
+  },
+  {
+    "name": "Pull&Bear",
+    "url": "https://www.pullandbear.com/gb/",
+    "sells": "casual fashion for women and men: jeans, t-shirts, sweatshirts, jackets, trousers, trainers"
+  },
+  {
+    "name": "Topshop",
+    "url": "https://www.topshop.com/gb/topshop",
+    "sells": "women's fashion: jeans, dresses, tops, jackets, knitwear, shoes, accessories"
+  },
+  {
+    "name": "Abercrombie & Fitch",
+    "url": "https://www.abercrombie.com/shop/uk",
+    "sells": "premium casual clothing for women, men and kids: jeans, shirts, jumpers, jackets, loungewear"
+  },
+  {
+    "name": "Calvin Klein",
+    "url": "https://www.calvinklein.co.uk/",
+    "sells": "designer clothing: jeans, underwear, t-shirts, jackets, bags, fragrance, accessories"
+  },
+  {
+    "name": "Hollister",
+    "url": "https://www.hollisterco.com/shop/uk",
+    "sells": "casual teen and young adult clothing: jeans, hoodies, t-shirts, shorts, swimwear, jackets"
+  },
+  {
+    "name": "Superdry",
+    "url": "https://www.superdry.com/",
+    "sells": "casual and outdoor clothing: jackets, coats, hoodies, t-shirts, jeans, sportswear, bags"
+  },
+  {
+    "name": "Amazon UK",
+    "url": "https://www.amazon.co.uk/",
+    "sells": "almost everything: electronics, computers, books, clothing, shoes, home and kitchen, toys, groceries, beauty, sports, DIY"
+  },
+  {
+    "name": "eBay UK",
+    "url": "https://www.ebay.co.uk/",
+    "sells": "marketplace for new and used items from many sellers: electronics, clothing, collectibles, car parts, home, toys (some listings are auctions)"
+  },
+  {
+    "name": "Argos",
+    "url": "https://www.argos.co.uk/",
+    "sells": "general retailer: electronics, appliances, furniture, home, toys, garden, sports and fitness, jewellery"
+  },
+  {
+    "name": "Currys",
+    "url": "https://www.currys.co.uk/",
+    "sells": "electronics and appliances: laptops, TVs, phones, headphones, cameras, gaming, washing machines, fridges, kitchen appliances"
+  },
+  {
+    "name": "John Lewis",
+    "url": "https://www.johnlewis.com/",
+    "sells": "department store: clothing, beauty, home and furniture, electricals, kitchenware, toys, gifts"
+  },
+  {
+    "name": "Marks & Spencer",
+    "url": "https://www.marksandspencer.com/",
+    "sells": "clothing for women, men and kids, lingerie, school uniform, home, beauty, food gifts, wine"
+  },
+  {
+    "name": "Next",
+    "url": "https://www.next.co.uk/",
+    "sells": "clothing for women, men and kids: jeans, shirts, dresses, school uniform, shoes, plus home and furniture"
+  },
+  {
+    "name": "H&M",
+    "url": "https://www2.hm.com/en_gb/index.html",
+    "sells": "affordable fashion for women, men and kids: jeans, t-shirts, dresses, jackets, basics, plus home textiles"
+  },
+  {
+    "name": "Uniqlo",
+    "url": "https://www.uniqlo.com/uk/en/",
+    "sells": "basics and everyday clothing: t-shirts, jeans, knitwear, down jackets, thermal wear, trousers"
+  },
+  {
+    "name": "JD Sports",
+    "url": "https://www.jdsports.co.uk/",
+    "sells": "trainers and sportswear: running shoes, tracksuits, hoodies, football kits, bags"
+  },
+  {
+    "name": "Nike UK",
+    "url": "https://www.nike.com/gb/",
+    "sells": "Nike trainers, running shoes, sportswear, football boots, tracksuits, sports equipment"
+  },
+  {
+    "name": "Boots",
+    "url": "https://www.boots.com/",
+    "sells": "health and beauty: skincare, makeup, fragrance, haircare, vitamins, medicines, baby products, electric toothbrushes"
+  },
+  {
+    "name": "Tesco Groceries",
+    "url": "https://www.tesco.com/groceries/en-GB/",
+    "sells": "groceries and household essentials: food, drinks, cleaning products, toiletries (basket needs a login and delivery slot)"
+  },
+  {
+    "name": "IKEA UK",
+    "url": "https://www.ikea.com/gb/en/",
+    "sells": "furniture and home: sofas, beds, wardrobes, desks, storage, kitchenware, lighting, textiles, plants"
+  },
+  {
+    "name": "Waterstones",
+    "url": "https://www.waterstones.com/",
+    "sells": "books: fiction, non-fiction, children's books, signed editions, stationery, gifts"
+  },
+  {
+    "name": "Etsy",
+    "url": "https://www.etsy.com/uk/",
+    "sells": "handmade, vintage and personalised items from independent sellers: jewellery, gifts, art, home decor, clothing"
   }
 ]

@@ -17,7 +17,8 @@ Never put the Gemini key in a `VITE_` variable: it belongs on the backend.
 | GET | `/api/skills` | Load the existing skill strips and variable/step details. |
 | GET | `/api/skills/{id}` | Get the selected skill before planning. |
 | POST | `/api/skills/{id}/plans` | Submit `{ "prompt": "Find ps5 at https://…" }`; returns a job. |
-| POST | `/api/skills/{id}/runs` | Submit `{ "url": "https://…", "arguments": { "query": "ps5" } }`; returns a job. |
+| POST | `/api/skills/{id}/runs` | Submit `{ "url": "https://…", "arguments": { "query": "ps5" } }`, plus optional `"choices": { "size": "M" }` and `"constraints": { "items": 3, "max_price": 30, "currency": "GBP", "requirements": [] }`; returns a job. |
+| POST | `/api/jobs/{id}/answer` | Submit `{ "field": "size", "value": "M" }` while a run waits for the shopper (`needs_input`); the run continues. |
 | POST | `/api/recordings` | Submit `{ "url": "https://…", "skill_id": "recorded_UNIQUE_ID" }`; returns a job. |
 | POST | `/api/recordings/{id}/stop` | Stop and compile; wait for terminal frames before showing the draft. |
 | PATCH | `/api/skills/{id}` | Save the draft's `{ "name": "…", "description": "…" }`. |
@@ -31,7 +32,9 @@ Planning and skill metadata/delete HTTP handlers were added because the dashboar
 existing chat and Save/Delete controls had no matching backend routes. Planning
 calls the existing `webagent.planner.plan_from_chat`; name/description/site metadata
 is stored beside the intents in `skill_metadata.json`. Naming does not rewrite the
-intent program. No `webagent` source or WebSocket protocol changes were required.
+intent program. The answer endpoint and run `choices`/`constraints` connect the
+agent's existing `ask`/`answers` hooks and its budget/item checks to the dashboard;
+the WebSocket envelope is unchanged.
 
 Skill selection still works by clicking a strip, typing `@`, or naming the skill.
 The adapter plans each selected skill, displays the returned summary and sites,
@@ -58,7 +61,9 @@ The client resolves these paths against the API origin, using `ws://` for HTTP a
 
 | Backend event | Existing UI destination |
 |---|---|
-| Planning job result | `RunView` heading (summary), input chips (`variables`), dashed option chips (`choices`) and queued site cards (`sites`). |
+| Planning job result | `RunView` heading (summary), input chips (`variables`; an empty one is a personal choice such as size that the agent asks for), dashed option chips (`choices`), constraint chips (`constraints`: items, max price, total budget, requirements) and queued site cards (`sites`). `choices` (plus answers given so far) and `constraints` are sent with every site run. |
+| `agent` status `needs_input` (`field`, `question`, `options`) | The run is paused, waiting for the shopper: an answer box (option buttons and a text box) inside the spotlight window under "Waiting for you" (or under the windows if another site is pinned), a hand marker on the route map, and the spotlight moves to that site. Questions are only asked when the agent can't proceed without one: a known answer that matches a visible option is clicked directly, and no question is asked when no choices are on screen. The answer goes to `POST /api/jobs/{id}/answer` and is reused for later sites; the `shopper chose …` log clears the card. |
+| `agent` logs `product check passed` / `product rejected` / `item N of M in the basket` | Activity lines; with constraints the agent reads each chosen product's name and price, skips ones over budget or not matching, and repeats until it has the requested number of different products. |
 | `recorder` | `Rail` REC bar's readable latest action and action count. |
 | Recording `status: stopping/processing` | Draft strip's “Reading … actions” state. |
 | Recording terminal result's `skill` | Existing draft name/Steps/Save/Discard controls. Closing the backend browser also triggers compilation. |
@@ -113,14 +118,18 @@ the late job is cancelled. Effects and the API subscriptions have cleanup paths.
 - Planning uses the existing shopping-oriented planner and checked-shop list.
   Extracted columns depend on the selected skill. The adapter executes run jobs;
   it does not add spreadsheet export or a payment/approval API.
-- `needs_human` is terminal; the current backend has no resume command.
-- The planner returns `choices` (e.g. a size from the message), but
-  `POST /api/skills/{id}/runs` accepts only the skill's own `arguments` and rejects
-  unknown names, and the API run passes no `answers` to the agent. Choices are shown
-  as dashed chips only; a site that needs one ends as `needs_human`.
-- API runs call `run_program` for one site, not the CLI orchestrator, so no extra
-  product name/price extraction or sheet write happens. The results table shows
-  `outputs` only when the skill has `extract` steps.
+- Without named shops or a number of shops in the message, the planner uses 4 shops.
+- `needs_human` is terminal; there is no resume command for it.
+  Questions are different: a site waiting on `needs_input` pauses (its time limit is
+  paused too) for up to 15 minutes, then ends as `needs_human` if nobody answers.
+- Budget checks compare numbers in one currency only: a product priced in a different
+  currency from the budget is accepted and noted rather than converted. A price the
+  page doesn't show is also noted, not guessed.
+- Item count and budget need a step that chooses the product (e.g. "the product that
+  best matches {{query}}"); a skill without one runs as before and says so in its notes.
+- API runs call `run_program` for one site, not the CLI orchestrator, so no sheet write
+  happens. Product name/price are read only when the message has constraints (or the
+  skill has `extract` steps); the results table then has one row per product.
 - Only task output is streamed; independently started CLI/server process output
   is outside the job's console capture.
 

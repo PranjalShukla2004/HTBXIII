@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from . import AGENT_ROOT
 from .agent import AgentBackend
 from .jobs import JobManager, ServiceError
-from .models import PlanRequest, RecordingRequest, RunRequest, SkillUpdate
+from .models import AnswerRequest, PlanRequest, RecordingRequest, RunRequest, SkillUpdate
 from .storage import SkillStore
 
 
@@ -131,6 +131,11 @@ def create_app(*, data_dir=None, state_dir=None, backend=None, run_timeout=600,
     @app.post("/api/jobs/{job_id}/cancel")
     async def cancel_job(job_id: str):
         return (await manager.cancel(job_id)).snapshot()
+
+    @app.post("/api/jobs/{job_id}/answer")
+    async def answer_job(job_id: str, command: AnswerRequest):
+        # A run asked the shopper something (size, colour, ...): continue it with the answer.
+        return manager.answer(job_id, command).snapshot()
 
     @app.get("/api/jobs/{job_id}/screenshot")
     async def screenshot(job_id: str):

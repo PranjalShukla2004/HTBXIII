@@ -7,7 +7,8 @@ import { TIER_META, cx, hostOf, siteColor } from '../lib/ui'
 import { Avatar, Field, Strip, Ticks } from './Strip'
 import type { Tone } from './Strip'
 import { SimPage } from './SimPage'
-import { money, parseMoney } from '../lib/results'
+import { QuestionCard } from './QuestionCard'
+import { currencyOf, money, parseMoney } from '../lib/results'
 
 const REASON: Record<FocusReason, string> = { heal: 'Self-heal', needs: 'Needs you', price: 'Price found', live: 'Live' }
 const STATUS_LABEL: Record<TargetState['status'], string> = {
@@ -17,6 +18,8 @@ const STATUS_TEXT: Record<TargetState['status'], string> = {
   queued: 'text-fg-3', running: 'text-accent-2', ok: 'text-fg-2', failed: 'text-heal', needs_human: 'text-fuzzy', stopped: 'text-fg-3',
 }
 const HEAL_MS = 3400
+const itemLabel = (item: Record<string, string | number>) =>
+  [item.product_name, item.price].filter((v) => v !== undefined && v !== '—' && v !== '').join(' ') || String(item.product_url ?? 'item')
 
 type Pt = { x: number; y: number }
 
@@ -82,15 +85,17 @@ export function SiteWindow({
   const tone: Tone = t.status === 'queued' ? 'ghost' : t.blocked ? 'warn' : ['failed', 'stopped'].includes(t.status) ? 'warn' : done ? 'chip' : t.learned ? 'warn' : 'sel'
   const raw = t.result ? t.result.unit ?? t.result.price ?? t.result.total : undefined
   const amount = parseMoney(raw)
-  const price = amount === undefined ? String(raw ?? '') : money(amount, String(raw).match(/[£$€]/)?.[0] ?? '£')
+  const price = amount === undefined ? String(raw ?? '') : money(amount, currencyOf(raw) ?? '')
+  const asking = !!t.question && t.status === 'running'
   const footer = t.takeover ? 'Your turn. Tick the box in the window.' : t.blocked ? t.blocked.message
+    : asking ? `Waiting for you: ${t.question!.question}`
     : t.status === 'queued' ? hostOf(t.url) : done && USE_MOCK ? 'Finished' : (t.currentStep ?? 'Opening the site')
 
   return (
     <div
       className={cx(
         'overflow-hidden rounded-xl bg-panel ring-1 transition-[opacity,box-shadow]',
-        t.blocked ? 'needs ring-fuzzy/70' : 'ring-rule',
+        t.blocked ? 'needs ring-fuzzy/70' : asking ? 'ring-fuzzy/70' : 'ring-rule',
         t.status === 'queued' && 'opacity-55',
         onPick && 'cursor-pointer hover:ring-rule-2',
       )}
@@ -166,15 +171,24 @@ export function SiteWindow({
       </div>
 
       <div className={cx('flex items-center gap-2 px-3 text-[12px] text-fg-2', spot ? 'min-h-10 py-1.5' : 'h-7')}>
-        {t.status === 'running' && <span className="size-1.5 shrink-0 animate-blink rounded-full bg-accent" />}
-        {t.blocked && <Hand className="size-3.5 shrink-0 text-fuzzy" />}
-        <span className={cx('min-w-0 flex-1', t.blocked && 'text-fuzzy')} title={t.detail ?? footer}>
+        {t.status === 'running' && !asking && <span className="size-1.5 shrink-0 animate-blink rounded-full bg-accent" />}
+        {(t.blocked || asking) && <Hand className="size-3.5 shrink-0 text-fuzzy" />}
+        <span className={cx('min-w-0 flex-1', (t.blocked || asking) && 'text-fuzzy')} title={t.detail ?? footer}>
           <span className={cx('block', spot ? 'leading-snug' : 'truncate')}>{footer}</span>
           {spot && t.blocked && t.attention?.options.length ? (
             <span className="mt-0.5 block truncate font-mono text-[11px] text-fg-2" title={t.attention.options.join(' · ')}>{t.attention.options.join(' · ')}</span>
           ) : null}
+          {spot && done && t.items && t.items.length > 1 ? (
+            <span className="mt-0.5 block truncate text-[11px] text-fg-3" title={t.items.map(itemLabel).join('\n')}>
+              {t.items.length} items: {t.items.map(itemLabel).join(' · ')}
+            </span>
+          ) : null}
         </span>
-        {!(spot && t.blocked) && <span className={cx('shrink-0 font-medium', spot ? 'text-[11px]' : 'text-[10.5px]', STATUS_TEXT[t.status])}>{STATUS_LABEL[t.status]}</span>}
+        {!(spot && t.blocked) && (
+          <span className={cx('shrink-0 font-medium', spot ? 'text-[11px]' : 'text-[10.5px]', asking ? 'text-fuzzy' : STATUS_TEXT[t.status])}>
+            {asking ? 'Waiting for you' : STATUS_LABEL[t.status]}
+          </span>
+        )}
         {spot && !t.blocked && !USE_MOCK && t.status !== 'queued' && (
           <a href={t.lastUrl ?? t.url} target="_blank" rel="noopener noreferrer" title={t.lastUrl ?? t.url} onClick={(e) => e.stopPropagation()}
             className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium text-fg-2 ring-1 ring-rule-2 hover:text-fg">
@@ -199,6 +213,8 @@ export function SiteWindow({
           )
         )}
       </div>
+      {/* The answer box sits right under "Waiting for you" in the spotlight. */}
+      {spot && asking && <QuestionCard msgId={msgId} t={t} inline />}
     </div>
   )
 }

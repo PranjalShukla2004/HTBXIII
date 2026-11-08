@@ -48,6 +48,22 @@ class SiteResult(BaseModel):
     bindings: list[Binding] = []
     screenshot: Optional[str] = None
     error: Optional[str] = None
+    # Only filled when the run had constraints: one entry per distinct product put in the basket,
+    # e.g. {"product_name": "...", "price": "£24.99", "product_url": "https://..."}.
+    items: list[dict] = []
+    note: Optional[str] = None       # e.g. "found 2 of 3 items within £30"
+
+# ---------- What the shopper asked for, beyond the skill's own inputs ----------
+class Constraints(BaseModel):
+    items: int = Field(default=1, ge=1, le=10)          # DISTINCT products wanted from each shop
+    max_price: Optional[float] = Field(default=None, gt=0)       # per item
+    total_budget: Optional[float] = Field(default=None, gt=0)    # for all items together
+    currency: Optional[str] = None                      # ISO code or symbol, e.g. "GBP" / "£"
+    requirements: list[str] = []                        # e.g. ["women's", "high-waisted"]
+
+    def active(self) -> bool:
+        return (self.items > 1 or self.max_price is not None
+                or self.total_budget is not None or bool(self.requirements))
 
 # ---------- Progress events (streamed to the frontend) ----------
 class AgentEvent(BaseModel):
@@ -63,3 +79,4 @@ class RunPlan(BaseModel):
     sheet_url: Optional[str] = None
     summary: str = ""
     choices: dict[str, str] = {}      # e.g. {"size": "32"}: pre-answered product options
+    constraints: Constraints = Field(default_factory=Constraints)

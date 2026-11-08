@@ -21,7 +21,8 @@ class AgentBackend:
         with observe_llm(on_llm):
             return await abstract(trace)
 
-    async def run(self, url, program, arguments, *, on_event, on_action, on_llm):
+    async def run(self, url, program, arguments, *, on_event, on_action, on_llm,
+                  ask=None, answers=None, constraints=None):
         from webagent.browser import launch
         from webagent.llm import observe_llm
         from webagent.run import run_program
@@ -29,8 +30,11 @@ class AgentBackend:
         with observe_llm(on_llm):
             # Follow the project's HEADLESS setting (default 0 = visible Chrome window), like the CLI.
             async with launch() as browser:
+                # ask(): questions the page raises (e.g. a size) go to the dashboard and wait for the
+                # shopper; answers: choices already made; constraints: budget, item count, requirements.
                 return await run_program(browser, url, program, variables=arguments,
-                                         on_event=on_event, on_action=on_action)
+                                         on_event=on_event, on_action=on_action, ask=ask,
+                                         answers=dict(answers or {}), constraints=constraints)
 
     async def close(self):
         import sys

@@ -30,7 +30,9 @@ Rules:
    recorded value as its default, referenced in steps as {{name}} (snake_case: query,
    quantity, size, colour). Copied (extracted) values are outputs, not variables.
 3. Choose the product the user clicked by its relation to the variables (e.g. the best
-   match for {{query}}), not by its literal name.
+   match for {{query}}), not by its literal name. Write that click's target starting with
+   "the product" (e.g. "the product that best matches {{query}}"): the agent uses it to apply
+   the shopper's budget and to pick several different products.
 4. Mark optional=true for steps a similar shop may not have (quantity box, size or
    colour picker, cookie banner) and for extract steps whose data may be missing
    (e.g. manufacturer link).

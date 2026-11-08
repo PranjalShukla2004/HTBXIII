@@ -8,6 +8,7 @@ import { budgetOf, foundResults } from '../lib/results'
 import { clock, cx, hostOf } from '../lib/ui'
 import { SiteWindow } from './SiteWindow'
 import { RouteMap } from './RouteMap'
+import { QuestionCard } from './QuestionCard'
 import { EvidenceModal, FoundStrip, PriceChart, Receipt, WinnerCard } from './Results'
 
 export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: string[]; run: RunState }) {
@@ -34,10 +35,14 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
   const reconnecting = Object.values(run.connections ?? {}).includes('reconnecting')
   const found = foundResults(run)
   const budget = budgetOf(run)
-  const steps = skill?.steps.map((s) => render(s.description, run.variables)) ?? []
+  // Step labels include answers given during the run (e.g. the size you picked).
+  const labelVars = { ...run.variables, ...run.choices }
+  const steps = skill?.steps.map((s) => render(s.description, labelVars)) ?? []
   const finished = !live && run.targets.length > 0
-  const inputs = Object.entries(run.variables)
+  // An empty input is a personal choice (e.g. size) you didn't give: the agent asks if a site needs it.
+  const inputs = Object.entries(run.variables).filter(([, value]) => value !== '')
   const choices = Object.entries(run.choices ?? {})
+  const wants = constraintChips(run)
   const activityCount = run.targets.reduce((n, t) => n + (t.activity?.length ?? 0), 0)
   // Selecting a lane or thumbnail enlarges that site; selecting the enlarged one again goes back.
   const togglePin = (id: string) => pin(msgId, run.pinned === id ? null : id)
@@ -71,7 +76,7 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
         </span>
       </header>
 
-      {(inputs.length > 0 || choices.length > 0) && (
+      {(inputs.length > 0 || choices.length > 0 || wants.length > 0) && (
         <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[12px]">
           {inputs.map(([name, value]) => (
             <span key={name} className="flex h-6 max-w-full items-center gap-1.5 rounded-md bg-chip px-2 ring-1 ring-rule" title={`Skill input “${name}”, chosen by the planner`}>
@@ -83,10 +88,16 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
             <span
               key={name}
               className="flex h-6 items-center gap-1.5 rounded-md border border-dashed border-rule-2 px-2 text-fg-2"
-              title="Read from your message. The run API only accepts the skill’s own inputs, so this option is not sent to the browser agent; it may stop and ask for it."
+              title="From your message or an answer you gave. Sent to every site, so the agent doesn’t ask again."
             >
               <span className="text-fg-3">{name.replace(/_/g, ' ')}</span>
               <span className="font-mono">{value}</span>
+            </span>
+          ))}
+          {wants.map(({ label, value, title }) => (
+            <span key={label + value} className="flex h-6 max-w-full items-center gap-1.5 rounded-md bg-accent/10 px-2 text-fg-2 ring-1 ring-accent/30" title={title}>
+              <span className="text-fg-3">{label}</span>
+              <span className="truncate font-mono text-fg">{value}</span>
             </span>
           ))}
         </div>
@@ -98,7 +109,7 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
           return (
             <RouteMap
               key={skillId}
-              steps={routeSkill ? routeSkill.steps.map((s) => render(s.description, run.variables)) : steps}
+              steps={routeSkill ? routeSkill.steps.map((s) => render(s.description, labelVars)) : steps}
               targets={targets}
               title={routes.size > 1 ? `${routeSkill?.name ?? 'Skill'}, ${targets.length} ${targets.length === 1 ? 'site' : 'sites'}` : undefined}
               selected={run.pinned}
@@ -150,7 +161,7 @@ function Windows({ msgId, run, kind, live, now }: { msgId: string; run: RunState
   const others = targets.filter((t) => t.id !== focus.id)
   const compact = !live && !run.pinned && targets.length > 1
   const reason: FocusReason | undefined = run.pinned ? undefined
-    : focus === waiting ? 'needs'
+    : focus === waiting || focus.question ? 'needs'
     : run.focus?.id === focus.id && age < HOLD * 2 ? run.focus.reason
     : focus.status === 'running' ? 'live' : undefined
 
@@ -184,8 +195,26 @@ function Windows({ msgId, run, kind, live, now }: { msgId: string; run: RunState
           </div>
         )}
       </div>
+      {/* A waiting site that isn't in the spotlight (e.g. you pinned another one) still gets its answer box here. */}
+      {others.filter((t) => t.question && t.status === 'running').map((t) => (
+        <div key={t.id} className="mt-3"><QuestionCard msgId={msgId} t={t} /></div>
+      ))}
     </div>
   )
+}
+
+/** What the planner read from the message beyond the skill inputs: budget, item count, requirements. */
+function constraintChips(run: RunState): { label: string; value: string; title: string }[] {
+  const c = run.constraints
+  if (!c) return []
+  const cur = c.currency ? ({ GBP: '£', USD: '$', EUR: '€', INR: '₹' } as Record<string, string>)[c.currency.toUpperCase()] ?? `${c.currency} ` : ''
+  const price = (n: number) => `${cur}${n.toLocaleString('en-GB', { maximumFractionDigits: 2 })}`
+  return [
+    ...(c.items > 1 ? [{ label: 'items', value: `${c.items} different`, title: `The agent puts ${c.items} different products in each site’s basket.` }] : []),
+    ...(c.maxPrice ? [{ label: 'max', value: `${price(c.maxPrice)} each`, title: 'Each product’s price is read on its page; anything over this is skipped and another one chosen.' }] : []),
+    ...(c.totalBudget ? [{ label: 'budget', value: `${price(c.totalBudget)} total`, title: 'Each remaining item may use an equal share of what’s left of this budget.' }] : []),
+    ...c.requirements.map((req) => ({ label: 'must be', value: req, title: 'Each chosen product is checked against this on its page.' })),
+  ]
 }
 
 function PanelToggle({ open, onClick, label, count }: { open: boolean; onClick: () => void; label: string; count: number }) {
@@ -240,6 +269,7 @@ function Cell({ value, column }: { value: string | number; column: string }) {
     return <span className={tone}>{value}</span>
   }
   if (column === 'Notes') return <span className="block max-w-[420px] text-[13px] leading-snug">{value}</span>
+  if (column === 'Item') return <span className="whitespace-nowrap">{value}</span>
   return <>{value}</>
 }
 

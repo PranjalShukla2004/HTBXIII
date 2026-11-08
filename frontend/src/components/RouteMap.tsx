@@ -37,16 +37,17 @@ export function RouteMap({ steps, targets, title, selected, onPick }: {
       </div>
       <div className="space-y-0.5">
         {targets.map((t) => {
+          const asking = t.status === 'running' && !!t.question
           const stuck = t.status === 'needs_human' || t.status === 'failed'
           const at = t.status === 'ok' ? n - 1 : stuck ? stopStep(t, n) : Math.min(t.stepIndex, n - 1)
-          const stuckColor = t.status === 'needs_human' ? 'var(--color-fuzzy)' : 'var(--color-heal)'
+          const stuckColor = t.status === 'needs_human' || asking ? 'var(--color-fuzzy)' : 'var(--color-heal)'
           const isSelected = selected === t.id
           const Row = onPick ? 'button' : 'div'
           return (
             <Row
               key={t.id}
               {...(onPick ? { onClick: () => onPick(t.id), 'aria-pressed': isSelected } : {})}
-              title={`${t.name}: ${STATUS[t.status]}${onPick ? `. ${isSelected ? 'Click to show all sites' : 'Click to enlarge'}` : ''}`}
+              title={`${t.name}: ${asking ? 'waiting for your answer' : STATUS[t.status]}${onPick ? `. ${isSelected ? 'Click to show all sites' : 'Click to enlarge'}` : ''}`}
               className={cx('-mx-1.5 grid w-[calc(100%+12px)] items-center gap-x-1.5 rounded-md px-1.5 py-1 text-left transition-colors',
                 onPick && (isSelected ? 'bg-chip ring-1 ring-rule-2' : 'hover:bg-chip/60'))}
               style={{ gridTemplateColumns: cols }}
@@ -58,7 +59,7 @@ export function RouteMap({ steps, targets, title, selected, onPick }: {
               <span className="relative grid h-4 items-center gap-x-1.5" style={{ gridColumn: '2 / -1', gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
                 {Array.from({ length: n }, (_, i) => {
                   const tier = t.tiers[i]
-                  const live = t.status === 'running' && i === t.stepIndex
+                  const live = t.status === 'running' && !asking && i === t.stepIndex
                   const stop = stuck && i === at
                   return (
                     <span
@@ -72,11 +73,11 @@ export function RouteMap({ steps, targets, title, selected, onPick }: {
                 {t.status !== 'queued' && (
                   <span
                     className="absolute top-1/2 grid size-4 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full ring-2 ring-panel transition-[left] duration-700 ease-[cubic-bezier(.65,0,.35,1)]"
-                    style={{ left: `calc(${at + 0.5} * 100% / ${n})`, background: stuck ? stuckColor : siteColor(t.index) }}
-                    aria-label={`${t.name}: step ${at + 1} of ${n}, ${STATUS[t.status]}`}
+                    style={{ left: `calc(${at + 0.5} * 100% / ${n})`, background: stuck || asking ? stuckColor : siteColor(t.index) }}
+                    aria-label={`${t.name}: step ${at + 1} of ${n}, ${asking ? 'waiting for your answer' : STATUS[t.status]}`}
                   >
                     {t.status === 'ok' ? <Check className="size-2.5 text-white" strokeWidth={3.5} />
-                      : t.status === 'needs_human' ? <Hand className="size-2.5 text-black" strokeWidth={2.5} />
+                      : t.status === 'needs_human' || asking ? <Hand className="size-2.5 text-black" strokeWidth={2.5} />
                       : t.status === 'failed' ? <X className="size-2.5 text-black" strokeWidth={3} /> : null}
                   </span>
                 )}

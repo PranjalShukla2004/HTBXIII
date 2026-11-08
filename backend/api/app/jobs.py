@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import shutil
 import threading
@@ -14,6 +15,15 @@ from .streams import EventStream
 
 logger = logging.getLogger(__name__)
 TERMINAL = {"done", "failed", "needs_human", "cancelled"}
+
+
+def _accepts(function, name):
+    """Whether a backend method takes this keyword (older/test backends may not)."""
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 class ServiceError(Exception):
@@ -40,12 +50,17 @@ class Job:
     log_error: bool = False
     task: asyncio.Task | None = None
     stop: asyncio.Event = field(default_factory=asyncio.Event)
+    # A run that is waiting for the shopper: {"field", "question", "options"} and its answer.
+    question: dict | None = None
+    answer: asyncio.Future | None = None
+    deadline: asyncio.Timeout | None = None
+    timeout: float | None = None        # overrides the manager's limit (e.g. several products)
 
     def snapshot(self):
         return {"job_id": self.id, "kind": self.kind, "skill_id": self.skill_id,
                 "url": self.url, "status": self.status,
                 "created_at": self.created_at, "updated_at": self.updated_at,
-                "result": self.result, "error": self.error,
+                "result": self.result, "error": self.error, "question": self.question,
                 "log_url": f"/api/jobs/{self.id}/logs",
                 "streams": {channel: f"/ws/jobs/{self.id}/{channel}"
                             for channel in self.streams}}
@@ -53,12 +68,14 @@ class Job:
 
 class JobManager:
     def __init__(self, store, backend, state_dir, *, run_timeout=600,
-                 recording_timeout=3600, history_limit=512, retained_jobs=100):
+                 recording_timeout=3600, history_limit=512, retained_jobs=100,
+                 answer_timeout=900):
         self.store = store
         self.backend = backend
         self.state_dir = Path(state_dir)
         self.run_timeout = run_timeout
         self.recording_timeout = recording_timeout
+        self.answer_timeout = answer_timeout
         self.history_limit = history_limit
         self.retained_jobs = retained_jobs
         self.jobs: dict[str, Job] = {}
@@ -106,8 +123,47 @@ class JobManager:
             raise ServiceError(422, "unknown_arguments", "Unknown arguments: " + ", ".join(sorted(unknown)))
         job = self._create("run", skill_id, str(request.url))
         arguments = {**program.variables, **request.arguments}
-        self._schedule(job, self._run(job, program, arguments))
+        constraints = request.constraints.model_dump() if request.constraints else None
+        if request.constraints and request.constraints.items > 1:
+            job.timeout = self.run_timeout * request.constraints.items   # one budget per product
+        self._schedule(job, self._run(job, program, arguments, choices=dict(request.choices),
+                                      constraints=constraints))
         return job
+
+    def answer(self, job_id, request):
+        """Hand the shopper's answer to a run that is waiting for one."""
+        job = self.get(job_id)
+        if job.question is None or job.answer is None or job.answer.done():
+            raise ServiceError(409, "no_question", "This job is not waiting for an answer")
+        if request.field and request.field != job.question["field"]:
+            raise ServiceError(409, "question_changed", "The agent is asking a different question now")
+        self._log(job, f"Answer received: {job.question['field']} = {request.value}", source="status")
+        job.answer.set_result(request.value)
+        return job
+
+    async def _ask(self, job, field_name, question, options):
+        """run_program's ask(): publish the question, then wait for POST /api/jobs/{id}/answer."""
+        loop = asyncio.get_running_loop()
+        job.answer = loop.create_future()
+        job.question = {"field": field_name, "question": question, "options": list(options)}
+        self._status(job, "needs_input")
+        # Time spent waiting for a person doesn't count against the run's time limit.
+        remaining = None
+        if job.deadline is not None and job.deadline.when() is not None:
+            remaining = job.deadline.when() - loop.time()
+            job.deadline.reschedule(None)
+        try:
+            return await asyncio.wait_for(job.answer, timeout=self.answer_timeout)
+        except TimeoutError:
+            self._log(job, f"No answer within {self.answer_timeout // 60} minutes: {question}",
+                      source="status", level="warning")
+            return None
+        finally:
+            job.question, job.answer = None, None
+            if remaining is not None and job.deadline is not None:
+                job.deadline.reschedule(loop.time() + max(remaining, 60))
+            if job.status == "needs_input":
+                self._status(job, "running", log=False)
 
     def start_plan(self, skill_id, request):
         program = self.skill(skill_id)
@@ -159,9 +215,10 @@ class JobManager:
             await self._execute_captured(job, operation)
 
     async def _execute_captured(self, job, operation):
-        timeout = self.recording_timeout if job.kind == "recording" else self.run_timeout
+        timeout = job.timeout or (self.recording_timeout if job.kind == "recording" else self.run_timeout)
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(timeout) as deadline:
+                job.deadline = deadline
                 result, status = await operation
             self._finish(job, status, result=result)
         except asyncio.CancelledError:
@@ -175,10 +232,12 @@ class JobManager:
             self._finish(job, "failed", error={"code": "execution_failed",
                                                "message": "Execution failed; check the API server logs"})
 
-    def _status(self, job, status):
+    def _status(self, job, status, *, log=True):
         job.status, job.updated_at = status, time.time()
         for stream in job.streams.values():
             stream.publish("status", {"status": status, "kind": job.kind, "skill_id": job.skill_id})
+        if not log:
+            return
         message = {
             "queued": f"Queued {job.kind} for skill {job.skill_id} on {job.url}",
             "running": f"Running skill {job.skill_id} on {job.url}",
@@ -186,6 +245,7 @@ class JobManager:
             "stopping": "Stopping recording...",
             "processing": "Recording stopped. Creating the skill from the recorded actions...",
             "planning": f"Planning a run for skill {job.skill_id}",
+            "needs_input": f"Waiting for the shopper: {(job.question or {}).get('question', '')}",
         }.get(status, status)
         self._log(job, message, source="status")
 
@@ -242,13 +302,20 @@ class JobManager:
     def _llm(self, job, payload):
         job.streams["llm"].publish(payload["type"], {k: v for k, v in payload.items() if k != "type"})
 
-    async def _run(self, job, program, arguments):
+    async def _run(self, job, program, arguments, *, choices=None, constraints=None):
         self._status(job, "running")
+        extra = {}
+        if _accepts(self.backend.run, "ask"):
+            extra["ask"] = lambda field_name, question, options: self._ask(job, field_name, question, options)
+        if choices and _accepts(self.backend.run, "answers"):
+            extra["answers"] = dict(choices)
+        if constraints and _accepts(self.backend.run, "constraints"):
+            extra["constraints"] = constraints
         result = await self.backend.run(
             job.url, program, arguments,
             on_event=lambda event: self._agent_event(job, event),
             on_action=lambda action: self._action(job, action),
-            on_llm=lambda payload: self._llm(job, payload))
+            on_llm=lambda payload: self._llm(job, payload), **extra)
         payload = result.model_dump(mode="json")
         if result.screenshot:
             destination = self.state_dir / job.id / "screenshot.png"

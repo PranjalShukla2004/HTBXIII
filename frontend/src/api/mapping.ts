@@ -1,6 +1,27 @@
 import { isRecord } from './backend.ts'
-import type { BackendSkill, JobFrame } from './backend.ts'
-import type { ActivityItem, RecordedAction, RunEvent, Skill, StepIntent } from './types.ts'
+import type { BackendConstraints, BackendSkill, JobFrame } from './backend.ts'
+import type { ActivityItem, RecordedAction, RunConstraints, RunEvent, Skill, StepIntent } from './types.ts'
+
+/** The planner's constraints as a view model; undefined when the shopper asked for nothing extra. */
+export function constraintsFromBackend(raw: unknown): RunConstraints | undefined {
+  if (!isRecord(raw)) return undefined
+  const c = raw as BackendConstraints
+  const positive = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : undefined)
+  const view: RunConstraints = {
+    items: Math.max(1, Math.round(positive(c.items) ?? 1)),
+    maxPrice: positive(c.max_price), totalBudget: positive(c.total_budget),
+    currency: typeof c.currency === 'string' && c.currency ? c.currency : undefined,
+    requirements: Array.isArray(c.requirements) ? c.requirements.map(String).filter(Boolean) : [],
+  }
+  return view.items > 1 || view.maxPrice || view.totalBudget || view.requirements.length ? view : undefined
+}
+
+/** The wire shape the run endpoint accepts. */
+export function constraintsToBackend(c?: RunConstraints): BackendConstraints | undefined {
+  if (!c) return undefined
+  return { items: c.items, max_price: c.maxPrice ?? null, total_budget: c.totalBudget ?? null,
+    currency: c.currency ?? null, requirements: c.requirements }
+}
 
 export function skillFromBackend(skill: BackendSkill): Skill {
   const intents: Record<string, StepIntent> = { navigate_to: 'navigate', search: 'fill', press: 'click' }
@@ -48,9 +69,10 @@ const sentence = (text: string) => {
 }
 const clip = (text: string, max = 80) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 
-/** Fill a skill's {{variable}} placeholders with the inputs the planner chose. */
+/** Fill a skill's {{variable}} placeholders with the inputs the planner chose. An empty input is a
+ *  personal choice (e.g. size) the shopper hasn't given yet; the agent asks for it if a site needs it. */
 export function render(text: string, vars: Record<string, string> = {}) {
-  return text.replace(/\{\{(\w+)\}\}/g, (whole, name: string) => vars[name] ?? whole)
+  return text.replace(/\{\{(\w+)\}\}/g, (whole, name: string) => vars[name] === '' ? '(you choose)' : vars[name] ?? whole)
 }
 
 const stepTarget = (skill: Skill, index: number, vars?: Record<string, string>) =>
@@ -101,7 +123,7 @@ function describeAgent(kind: string, message: string, detail: Record<string, unk
     if (message === 'acting') return { text: detail.cached ? 'Page open. Reusing saved matches from an earlier run on this site.' : 'Page open. Matching each step to this site.', tone: 'info' }
     if (message === 'done') return { text: 'All steps finished.', tone: 'ok' }
     if (message === 'needs_human') return { text: `Needs your attention: ${String(detail.reason || 'the agent cannot continue on its own')}`, tone: 'warn' }
-    if (message === 'needs_input') return { text: `Asked: ${String(detail.question || 'a choice is needed')}`, tone: 'warn' }
+    if (message === 'needs_input') return { text: `Asking you: ${String(detail.question || 'a choice is needed')}`, tone: 'warn' }
     return { text: sentence(message.replace(/_/g, ' ')), tone: 'info' }
   }
   if (kind === 'error') return { text: describeError(message), tone: 'error' }
@@ -149,6 +171,12 @@ function describeAgent(kind: string, message: string, detail: Record<string, unk
   if ((m = message.match(/^skipped optional step (\d+)/))) {
     return { text: `Skipped optional step: ${target(Number(m[1]))}`, tone: 'info', step: Number(m[1]), stepStatus: 'skipped' }
   }
+  // The shopper's answers and the budget / item-count checks (run.py).
+  if ((m = message.match(/^shopper chose (\w+) = ([\s\S]*)$/))) return { text: `You chose ${m[1].replace(/_/g, ' ')}: ${m[2]}`, tone: 'ok' }
+  if ((m = message.match(/^product rejected: ([\s\S]*?) - ([\s\S]*)$/))) return { text: `Skipped ${m[1]}: ${m[2]}`, tone: 'warn' }
+  if ((m = message.match(/^product check passed: ([\s\S]*?)(?: - ([\s\S]*))?$/))) return { text: `Picked ${m[1]}${m[2] ? ` (${m[2]})` : ''}`, tone: 'ok' }
+  if (/^item \d+ of \d+ in the basket: /.test(message)) return { text: sentence(message), tone: 'ok' }
+  if (/^(stopped looking after|this skill has no product-choosing step)/.test(message)) return { text: sentence(message), tone: 'warn' }
   return { text: sentence(message), tone: 'info' }
 }
 
@@ -211,6 +239,15 @@ export function runEvents(frame: JobFrame, skill: Skill, targetId?: string, vars
       events.push({ type: 'attention', targetId, question: detail.reason,
         options: Array.isArray(detail.options) ? detail.options.map(String) : [] })
     }
+    // The run is paused until the shopper answers (only sent when the backend can wait for one).
+    if (kind === 'status' && message === 'needs_input') {
+      const field = typeof detail.field === 'string' && detail.field ? detail.field : 'choice'
+      events.push({ type: 'question', targetId, field,
+        question: typeof detail.question === 'string' && detail.question ? detail.question : `Which ${field.replace(/_/g, ' ')} would you like?`,
+        options: Array.isArray(detail.options) ? detail.options.map(String) : [] })
+    }
+    const chose = kind === 'log' ? message.match(/^shopper chose (\w+) = ([\s\S]*)$/) : null
+    if (chose) events.push({ type: 'answered', targetId, field: chose[1], value: chose[2] })
     return events
   }
   return []

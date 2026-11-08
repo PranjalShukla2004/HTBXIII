@@ -39,7 +39,7 @@ async def shop_and_log(ctx: BrowserContext, program: IntentProgram, plan: RunPla
         emit("log", f"[{n}/{len(plan.sites)}] shopping on {site}", site=site)
         res = await run_program(ctx, site, program, variables=plan.variables,
                                 page=shop, on_event=on_event, run_tag=str(n),
-                                ask=ask, answers=answers)
+                                ask=ask, answers=answers, constraints=plan.constraints)
 
         if res.status == "done":
             missing = {k: d for k, d in NEEDED.items() if not res.outputs.get(k)}
@@ -52,21 +52,24 @@ async def shop_and_log(ctx: BrowserContext, program: IntentProgram, plan: RunPla
             res.outputs.setdefault("product_url", shop.url)
 
         if res.status == "done":
-            status, notes = "Added to cart", ""
+            status, notes = "Added to cart", res.note or ""
         elif res.status == "needs_human":
             status, notes = "Needs human", res.error or ""
         else:
             status, notes = "Failed", (res.error or "")[:120]
-        row = [urlparse(site).netloc, res.outputs.get("product_name"), res.outputs.get("price"),
-               res.outputs.get("product_url") if res.status == "done" else "", status, notes]
+        # one row per product when the shopper asked for several different ones
+        products = res.items or [res.outputs]
+        rows = [[urlparse(site).netloc, p.get("product_name"), p.get("price"),
+                 p.get("product_url") if res.status == "done" else "", status, notes] for p in products]
 
         if writer:
-            try:
-                row_no = writer.next_row
-                await writer.append(row)
-                emit("log", f"wrote sheet row {row_no}", site=site, row=row)
-            except Exception as e:
-                emit("error", f"sheet write failed: {e}", site=site)
+            for row in rows:
+                try:
+                    row_no = writer.next_row
+                    await writer.append(row)
+                    emit("log", f"wrote sheet row {row_no}", site=site, row=row)
+                except Exception as e:
+                    emit("error", f"sheet write failed: {e}", site=site)
 
         emit("done", status, site=site, result=res.model_dump())
         results.append(res)
