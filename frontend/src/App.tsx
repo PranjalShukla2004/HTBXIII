@@ -4,6 +4,7 @@ import { useStore } from './store'
 import { USE_MOCK } from './api'
 import { Logo, Rail } from './components/Rail'
 import { Composer, Thread } from './components/Chat'
+import { CommentatorCaption, CommentatorToggle } from './components/Commentator'
 import { LearnPanel } from './components/LearnPanel'
 import { cx } from './lib/ui'
 
@@ -53,8 +54,10 @@ export default function App() {
             <PanelLeft className="size-4" />
             <Logo size={22} />
           </button>
+          <div className="ml-auto" />
+          <CommentatorToggle />
           {hasMessages && (
-            <button onClick={newChat} className="glass ml-auto flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-medium text-fg-2 hover:text-fg">
+            <button onClick={newChat} className="glass flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-medium text-fg-2 hover:text-fg">
               <SquarePen className="size-4" /> New task
             </button>
           )}
@@ -62,7 +65,10 @@ export default function App() {
         <div className="scroll-edges flex min-h-0 flex-1 flex-col overflow-y-auto">
           {recording ? <LearnPanel /> : <Thread />}
         </div>
-        <Composer />
+        <div className="relative">
+          <CommentatorCaption />
+          <Composer />
+        </div>
       </main>
     </div>
   )

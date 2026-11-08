@@ -4,6 +4,7 @@ import { perItemChoice } from './api/mapping'
 import type { ActivityItem, RecordedAction, ResultTable, RunConstraints, RunEvent, RunTarget, Skill, SkillDraft, Tier } from './api'
 import { loadStats, saveStats, withRun } from './lib/stats'
 import type { SkillStats } from './lib/stats'
+import { RUN_EVENT } from './lib/commentator'
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 const errText = (error: unknown) => (error instanceof Error ? error.message : String(error))
@@ -341,6 +342,8 @@ export const useStore = create<Store>((set, get) => {
       let finished = false
       const unsub = api.onRunEvents(runId, (e) => {
         patchRun(msgId, (r) => reduce(r, e))
+        // Read-only copy for the live commentator (src/lib/commentator.ts); changes nothing here.
+        window.dispatchEvent(new CustomEvent(RUN_EVENT, { detail: { e, prompt, runKey: msgId } }))
         if (e.type === 'done') remember(msgId, skillIds[0])
         if (e.type === 'done' || e.type === 'error') {
           finished = true
