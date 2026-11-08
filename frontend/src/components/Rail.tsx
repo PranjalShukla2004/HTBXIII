@@ -16,7 +16,7 @@ export function Rail({ onPicked }: { onPicked?: () => void }) {
   const load = useStore((s) => s.loadSkills)
 
   return (
-    <aside className="flex h-full w-full flex-col bg-side">
+    <aside className="glass-thick flex h-full w-full flex-col">
       <div className="flex h-14 items-center gap-2.5 px-4">
         <Logo />
         <span className="text-[16px] font-semibold tracking-[-0.02em]">CopyCat</span>
@@ -106,7 +106,7 @@ function RecordControl() {
       {!open ? (
         <button
           onClick={() => setOpen(true)}
-          className="group flex h-10 w-full items-center gap-2.5 rounded-xl bg-panel px-3 text-[14px] font-medium ring-1 ring-rule transition hover:ring-rule-2"
+          className="glass group flex h-10 w-full items-center gap-2.5 rounded-full px-3.5 text-[14px] font-medium hover:bg-white/8"
         >
           <span className="size-2.5 rounded-full bg-rec shadow-[0_0_0_3px_rgb(255_91_79/.18)] transition group-hover:shadow-[0_0_0_5px_rgb(255_91_79/.2)]" />
           Record a skill
@@ -127,14 +127,14 @@ function RecordControl() {
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}
             aria-label="Start URL"
-            className="h-10 w-full rounded-xl bg-bg px-3 font-mono text-[12px] ring-1 ring-rule-2 outline-none focus:ring-accent"
+            className="h-10 w-full rounded-full bg-black/30 px-3.5 font-mono text-[12px] ring-1 ring-rule-2 outline-none focus:ring-accent"
             placeholder="https://"
           />
           <div className="flex gap-2">
-            <button type="button" onClick={() => setOpen(false)} className="h-9 rounded-lg px-3 text-[13px] text-fg-3 hover:text-fg">
+            <button type="button" onClick={() => setOpen(false)} className="h-9 rounded-full px-3 text-[13px] text-fg-3 hover:bg-white/6 hover:text-fg">
               Cancel
             </button>
-            <button type="submit" className="flex h-9 flex-1 items-center justify-center gap-2 rounded-lg bg-rec text-[13px] font-semibold text-white hover:brightness-110">
+            <button type="submit" className="flex h-9 flex-1 items-center justify-center gap-2 rounded-full bg-rec bg-[linear-gradient(180deg,rgb(255_255_255/.22),transparent_60%)] text-[13px] font-semibold text-white shadow-[inset_0_1px_0_rgb(255_255_255/.3),0_6px_18px_-6px_rgb(255_77_77/.7)] hover:brightness-110">
               <span className="size-2 rounded-full bg-white" /> Start
             </button>
           </div>
@@ -179,7 +179,7 @@ function SkillStrip({ skill, onPicked }: { skill: Skill; onPicked?: () => void }
         </Strip>
         <button
           onClick={() => setOpen((o) => !o)}
-          className="grid w-7 place-items-center rounded-lg text-fg-3 hover:bg-panel hover:text-fg"
+          className="grid w-7 place-items-center rounded-lg text-fg-3 hover:bg-white/6 hover:text-fg"
           aria-label={`${open ? 'Hide' : 'Show'} steps for ${skill.name}`}
           aria-expanded={open}
         >

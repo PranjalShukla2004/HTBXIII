@@ -36,7 +36,7 @@ function Message({ m }: { m: ChatMessage }) {
     const s = skills.find((k) => k.id === m.skillIds[0])
     return (
       <div className="animate-slide-in flex justify-end">
-        <div className="flex max-w-[80%] items-center gap-2.5 rounded-2xl rounded-br-md bg-panel py-2.5 pr-4 pl-2.5 text-[15px] ring-1 ring-rule">
+        <div className="flex max-w-[80%] items-center gap-2.5 rounded-[20px] rounded-br-md bg-sel py-2.5 pr-4 pl-2.5 text-[15px] ring-1 ring-accent/25 backdrop-blur-xl">
           {s && <Avatar name={s.name} />}
           <span>{m.text}</span>
         </div>
@@ -79,16 +79,17 @@ function EmptyState() {
     <div className="mx-auto flex w-full max-w-[640px] flex-1 flex-col justify-center px-6 py-10">
       <h1 className="text-[44px] leading-[1.05] font-semibold tracking-[-0.035em] text-balance">
         Show it once.
-        <span className="block text-fg-3">Then just ask.</span>
+        <span className="block bg-[linear-gradient(100deg,var(--color-fg-3)_30%,var(--color-accent-2))] bg-clip-text pb-1 text-transparent">Then just ask.</span>
       </h1>
       {examples.length > 0 && (
         <div className="mt-10 space-y-2">
-          {examples.map((e) => (
+          {examples.map((e, i) => (
             <Strip
               key={e.text}
               as="button"
               tone="ghost"
-              className="h-12 w-full hover:border-rule-2 hover:bg-chip"
+              className="animate-slide-in h-12 w-full hover:-translate-y-px hover:border-rule-2 hover:bg-chip"
+              style={{ animationDelay: `${120 + i * 70}ms` }}
               onClick={() => {
                 setAttached([e.id])
                 window.dispatchEvent(new CustomEvent('copycat:prefill', { detail: e.text }))
@@ -167,7 +168,7 @@ export function Composer() {
   return (
     <div className="relative mx-auto w-full max-w-[960px] px-4 pb-4 md:px-8">
       {mention && options.length > 0 && (
-        <div className="animate-slide-in absolute bottom-full left-4 mb-2 w-72 space-y-1 rounded-xl bg-panel p-1.5 shadow-[0_16px_40px_rgb(0_0_0/.55)] ring-1 ring-rule-2 md:left-8">
+        <div className="glass-pop animate-slide-in absolute bottom-full left-4 mb-2 w-72 origin-bottom-left space-y-1 rounded-2xl p-1.5 md:left-8">
           {options.map((s, i) => (
             <Strip
               key={s.id}
@@ -188,14 +189,14 @@ export function Composer() {
         </div>
       )}
 
-      <div className="flex items-end gap-2 rounded-2xl bg-panel p-2 ring-1 ring-rule-2 transition focus-within:ring-accent/70">
+      <div className="glass-pop composer flex items-end gap-2 rounded-[22px] p-2 transition-shadow duration-300">
         {(chosen.length > 0 || guessed.length > 0) && (
           <div className="flex shrink-0 gap-1 self-center pl-1">
             {chosen.map((s) => (
               <button
                 key={s.id}
                 onClick={() => toggle(s.id)}
-                className="group flex h-7 items-center gap-1.5 rounded-md bg-sel pr-1.5 pl-1 text-[13px] font-medium text-fg ring-1 ring-accent/50"
+                className="group flex h-7 items-center gap-1.5 rounded-full bg-sel pr-1.5 pl-1 text-[13px] font-medium text-fg ring-1 ring-accent/50"
                 title={`${s.name} · click to remove`}
               >
                 <Avatar name={s.name} size={20} />
@@ -204,7 +205,7 @@ export function Composer() {
               </button>
             ))}
             {guessed.map((s) => (
-              <span key={s.id} className="flex h-7 items-center gap-1.5 rounded-md border border-dashed border-rule-2 pr-2 pl-1 text-[13px] text-fg-2" title={`Will use ${s.name}`}>
+              <span key={s.id} className="flex h-7 items-center gap-1.5 rounded-full border border-dashed border-rule-2 pr-2 pl-1 text-[13px] text-fg-2" title={`Will use ${s.name}`}>
                 <Avatar name={s.name} size={20} />
                 {s.name}
               </span>
@@ -237,8 +238,8 @@ export function Composer() {
           onClick={submit}
           disabled={!text.trim() || recording || running}
           className={cx(
-            'grid size-10 shrink-0 place-items-center rounded-xl transition',
-            'bg-accent text-white hover:bg-accent-2 disabled:bg-chip disabled:text-fg-3',
+            'grid size-10 shrink-0 place-items-center rounded-full transition',
+            'btn-gloss bg-accent text-white hover:bg-accent-2 disabled:bg-chip disabled:text-fg-3',
           )}
           aria-label="Run"
         >

@@ -274,7 +274,7 @@ export function PriceChart({ found, budget }: { found: Found[]; budget?: { amoun
                 {f.target.name}
               </span>
               {on && (
-                <span className="pointer-events-none absolute bottom-6 z-10 -translate-x-1/2 whitespace-nowrap rounded-md bg-chip px-2 py-1 text-[12px] text-fg shadow-lg ring-1 ring-rule-2">
+                <span className="pointer-events-none absolute bottom-6 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg glass-pop px-2 py-1 text-[12px] text-fg">
                   <span className="tabular font-mono font-semibold">{money(f.unit, f.cur)}</span>
                   {f.overBudget && budget ? ` · ${money(f.unit - budget.amount, f.cur)} over` : budget ? ` · ${money(budget.amount - f.unit, f.cur)} under` : ''}
                 </span>
@@ -381,8 +381,8 @@ export function EvidenceModal({ run, targetId, kind, onClose }: { run: RunState;
   const value = t.result ? String(t.result.unit ?? t.result.price ?? t.result.total ?? '') : ''
 
   return createPortal(
-    <div className="animate-fade-in fixed inset-0 z-50 grid place-items-center bg-black/70 p-4" onClick={onClose}>
-      <div role="dialog" aria-modal="true" aria-label={`Where ${t.name}’s price came from`} className="animate-slide-in w-full max-w-[640px] overflow-hidden rounded-xl bg-panel ring-1 ring-rule-2" onClick={(e) => e.stopPropagation()}>
+    <div className="animate-fade-in fixed inset-0 z-50 grid place-items-center bg-black/55 p-4 backdrop-blur-md" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={`Where ${t.name}’s price came from`} className="glass-pop animate-slide-in w-full max-w-[640px] overflow-hidden rounded-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2.5 border-b border-rule px-4 py-3">
           <Avatar name={t.name} size={22} color={siteColor(t.index)} />
           <div className="min-w-0 flex-1">

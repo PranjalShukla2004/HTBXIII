@@ -71,7 +71,7 @@ export function RouteMap({ steps, targets, title, selected, onPick }: {
                 })}
                 {t.status !== 'queued' && (
                   <span
-                    className="absolute top-1/2 grid size-4 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full ring-2 ring-panel transition-[left] duration-700 ease-[cubic-bezier(.65,0,.35,1)]"
+                    className="absolute top-1/2 grid size-4 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full ring-2 ring-[#16161a] transition-[left] duration-700 ease-[cubic-bezier(.65,0,.35,1)]"
                     style={{ left: `calc(${at + 0.5} * 100% / ${n})`, background: stuck ? stuckColor : siteColor(t.index) }}
                     aria-label={`${t.name}: step ${at + 1} of ${n}, ${STATUS[t.status]}`}
                   >

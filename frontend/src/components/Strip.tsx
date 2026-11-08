@@ -5,7 +5,7 @@ export type Tone = 'chip' | 'sel' | 'warn' | 'ghost'
 
 const TONE: Record<Tone, string> = {
   chip: 'bg-chip text-fg border-rule',
-  sel: 'bg-sel text-fg border-accent/60',
+  sel: 'bg-sel text-fg border-accent/50 shadow-[0_0_0_3px_rgb(124_107_255/.12)]',
   warn: 'bg-warn text-fg border-fuzzy/40',
   ghost: 'bg-panel text-fg-2 border-rule',
 }
@@ -19,7 +19,7 @@ export function Strip({
   ...rest
 }: { tone?: Tone; className?: string; children: React.ReactNode; as?: 'div' | 'button' } & React.HTMLAttributes<HTMLElement>) {
   return (
-    <As {...(rest as object)} className={cx('relative flex items-stretch overflow-hidden rounded-lg border text-left transition-colors', TONE[tone], className)}>
+    <As {...(rest as object)} className={cx('relative flex items-stretch overflow-hidden rounded-xl border text-left transition-colors', TONE[tone], className)}>
       {children}
     </As>
   )
