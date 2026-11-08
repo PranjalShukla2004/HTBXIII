@@ -134,7 +134,9 @@ async def llm_json(system: str, user: str, *, max_tokens: int = 8192, tag: str =
                 _mark(model, _retry_delay(e) or 6 * 3600, persist=True)
             elif code == 429:
                 _mark(model, min(_retry_delay(e) or 20, 90))
-            elif code in (500, 503, "timeout"):
+            elif code == "timeout":
+                _mark(model, 30)          # just slow under load: try again soon
+            elif code in (500, 503):
                 _mark(model, 120)
             else:
                 _notify("llm.error", **metadata, code=code)

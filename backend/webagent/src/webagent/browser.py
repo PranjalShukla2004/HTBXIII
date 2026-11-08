@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright, BrowserContext, Route
-from .config import HEADLESS, CHROMIUM_PATH, PROFILE_DIR
+from .config import HEADLESS, CHROMIUM_PATH, PROFILE_DIR, AUTH_STATE
 
 AD_HOSTS = (
     "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com",
@@ -38,7 +38,9 @@ async def launch_isolated(headless: bool | None = None, block_ads: bool = True):
             headless=HEADLESS if headless is None else headless,
             executable_path=CHROMIUM_PATH, **LAUNCH_ARGS)
         try:
-            ctx = await browser.new_context(**CONTEXT_ARGS)
+            # Reuse the logins saved by `python -m webagent.login` (Gmail, Outlook, ...).
+            state = str(AUTH_STATE) if AUTH_STATE.exists() else None
+            ctx = await browser.new_context(storage_state=state, **CONTEXT_ARGS)
             await _prepare(ctx, block_ads)
             yield ctx
         finally:

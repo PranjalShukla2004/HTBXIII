@@ -11,7 +11,8 @@ DESCRIBE_JS = r"""
 
   const SEL = 'input:not([type=hidden]),textarea,select,button,a[href],summary,[onclick],' +
               '[role=button],[role=link],[role=option],[role=radio],[role=tab],[role=combobox],' +
-              '[role=searchbox],[role=spinbutton],[role=menuitem],[role=menuitemradio],[aria-haspopup]';
+              '[role=searchbox],[role=spinbutton],[role=menuitem],[role=menuitemradio],[aria-haspopup],' +
+              '[contenteditable=""],[contenteditable="true"],[role=textbox]';
   const POPUP = '[role=listbox],[role=menu],[role=dialog],[aria-modal=true],[class*=popover]';
   const PICKER = '[class*=size],[class*=Size],[data-qa*=size],[data-testid*=size],[aria-label*=size i]';
   const visible = el => {
@@ -49,6 +50,7 @@ DESCRIBE_JS = r"""
     const exp = el.getAttribute('aria-expanded');
     if (exp) d.expanded = exp;
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') d.disabled = true;
+    if (el.isContentEditable) d.editable = true;
     if (tag === 'a' || tag === 'button' || el.matches('[onclick],[role=button]')) {
       const card = el.closest('[class*=product],[class*=card],[class*=item],article,li');
       const ctx = card ? clean(card.innerText).slice(0, 120) : '';
@@ -168,6 +170,8 @@ def format_elements(els: list[dict]) -> str:
             parts.append("(clickable choice)")
         if d.get("disabled"):
             parts.append("(disabled)")
+        if d.get("editable"):
+            parts.append("(editable text)")
         for k in ("role", "label", "aria", "ph", "title", "text", "img", "name", "value"):
             if d.get(k):
                 parts.append(f'{k}="{d[k]}"')
@@ -328,6 +332,37 @@ async def _select(el: Locator, value: str | None):
             return
     raise RuntimeError(f"no option matching {v!r} in dropdown")
 
+async def _is_editable(el: Locator) -> bool:
+    try:
+        return bool(await el.evaluate("e => e.isContentEditable"))
+    except Exception:
+        return False
+
+RECIPIENT_JS = r"""e => {
+  const by = (e.getAttribute('aria-labelledby') || '').split(' ')
+    .map(id => document.getElementById(id)?.innerText || '');
+  const names = [e.getAttribute('aria-label'), e.getAttribute('name'), e.getAttribute('placeholder'),
+                 e.labels && e.labels[0] ? e.labels[0].innerText : '', ...by];
+  return names.some(n => /^\s*(to|cc|bcc)\s*:?\s*$/i.test(n || '') || /recipient/i.test(n || ''));
+}"""
+
+async def _is_recipient(el: Locator) -> bool:
+    try:
+        return bool(await el.evaluate(RECIPIENT_JS))
+    except Exception:
+        return False
+
+async def _fill_recipient(page: Page, el: Locator, value: str):
+    """Email To/Cc boxes only accept an address once it is picked from the suggestions:
+    type it like a person, wait for the suggestion list, then Enter picks the address."""
+    await el.click()
+    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Backspace")
+    await el.press_sequentially(value, delay=25)
+    await page.wait_for_timeout(1500)
+    await page.keyboard.press("Enter")
+    await page.wait_for_timeout(500)
+
 async def act(page: Page, element: dict, op: str, value: str | None = None):
     el = page.locator(f'[data-agent-id="{element["id"]}"]').first
     await act_on(page, el, element["tag"], op, value)
@@ -340,7 +375,10 @@ async def act_on(page: Page, el: Locator, tag: str, op: str, value: str | None =
         await el.scroll_into_view_if_needed(timeout=3000)
     except Exception:
         pass
-    if op in ("fill", "search") and tag in ("input", "textarea"):
+    if op == "fill" and value and await _is_recipient(el):
+        await _fill_recipient(page, el, value)
+        return
+    if op in ("fill", "search") and (tag in ("input", "textarea") or await _is_editable(el)):
         await el.fill(value or "")
         if op == "search":
             await el.press("Enter")

@@ -9,3 +9,4 @@ __pycache__/
 backend/api/tests/result/
 service_account.json
 .agent-profile/
+.agent-auth.json

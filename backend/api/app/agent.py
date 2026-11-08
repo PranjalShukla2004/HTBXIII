@@ -2,12 +2,12 @@
 
 
 class AgentBackend:
-    async def plan(self, prompt, program, *, on_llm):
+    async def plan(self, prompt, program, *, on_llm, recorded_on=""):
         from webagent.llm import observe_llm
         from webagent.planner import plan_from_chat
 
         with observe_llm(on_llm):
-            return await plan_from_chat(prompt, program)
+            return await plan_from_chat(prompt, program, recorded_on)
 
     async def record(self, url, *, on_event, stop):
         from webagent.recorder import record
@@ -22,20 +22,23 @@ class AgentBackend:
             return await abstract(trace)
 
     async def run(self, url, program, arguments, *, on_event, on_action, on_llm, choices=None):
-        from webagent.browser import launch_isolated
+        from webagent.browser import launch, launch_isolated
         from webagent.llm import observe_llm
         from webagent.orchestrator import NEEDED
-        from webagent.run import run_program, extract
+        from webagent.run import run_program, extract, is_shopping
 
+        shopping = is_shopping(program)
+        # Shopping: one throwaway browser per run, so several shops can run side by side.
+        # Other skills (email, ...): the signed-in agent profile, because apps like Outlook keep
+        # their login in browser storage that a fresh browser can't copy. One at a time.
+        opener = launch_isolated() if shopping else launch(block_ads=False)
         with observe_llm(on_llm):
-            # One throwaway browser per run, so several sites can run side by side (a shared
-            # persistent profile can only be open in one browser at a time). Follows HEADLESS.
-            async with launch_isolated() as browser:
+            async with opener as browser:
                 page = await browser.new_page()
                 result = await run_program(browser, url, program, variables=arguments,
                                            on_event=on_event, on_action=on_action, page=page,
                                            answers=dict(choices or {}))
-                if result.status == "done":
+                if result.status == "done" and shopping:
                     # The table and sheet always want a product name and price.
                     missing = {k: d for k, d in NEEDED.items() if not result.outputs.get(k)}
                     if missing:
@@ -45,6 +48,8 @@ class AgentBackend:
                         except Exception:
                             pass
                     result.outputs.setdefault("product_url", page.url)
+                if not shopping:
+                    await page.wait_for_timeout(2000)   # let the audience see the sent mail
                 return result
 
     async def append_sheet(self, sheet_url, rows):

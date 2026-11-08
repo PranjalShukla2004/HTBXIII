@@ -5,16 +5,20 @@ from .config import DATA
 from .llm import llm_json
 from .schemas import Trace, TraceEvent, IntentProgram
 
-SYSTEM = """You turn a recorded e-commerce browsing session into a SITE-INDEPENDENT intent
-program. Another agent will replay it on OTHER online shops with different layouts,
-wording and URLs, so nothing in it may depend on this particular site.
+SYSTEM = """You turn a recorded browser session into a SITE-INDEPENDENT intent program.
+Another agent will replay it on OTHER websites that do the same job (another online shop,
+another email client such as Outlook instead of Gmail, another booking site, ...) with
+different layouts, wording and URLs, so nothing in it may depend on this particular site.
+First work out what KIND of task it is (shopping, sending an email, filling a form, ...)
+and describe every step in that task's general terms.
 
 Allowed ops:
 - navigate_to: reach a kind of page by any means (target describes the page)
-- search: type a value into the shop's product search box and submit it.
+- search: type a value into the site's search box and submit it (shops: product search).
   One search step replaces fill + Enter + clicking the search button.
 - click: click an element described by its meaning
-- fill / select / check: set a form control
+- fill / select / check: set a form control. "fill" also covers rich text areas such as
+  an email body, and recipient fields such as an email's "To" box.
 - press: press a key (rarely needed)
 - verify: an observable condition proving the previous steps worked
 - extract: record a piece of data from the current page. Every "extract" event means the
@@ -28,14 +32,25 @@ Rules:
    button wording.
 2. Every value the user TYPED or CHOSE becomes an input variable in "variables", with the
    recorded value as its default, referenced in steps as {{name}} (snake_case: query,
-   quantity, size, colour). Copied (extracted) values are outputs, not variables.
-3. Choose the product the user clicked by its relation to the variables (e.g. the best
-   match for {{query}}), not by its literal name.
-4. Mark optional=true for steps a similar shop may not have (quantity box, size or
+   quantity, size, colour for shops; recipient, subject, body for email).
+   Name a variable by the ROLE the value plays in the task, never by the value itself:
+   typing "phone" into a shop's search box is {{query}} (not {{phone}}), typing "2" into a
+   quantity box is {{quantity}}, typing an address into "To" is {{recipient}}.
+   The same value typed twice into the same box is ONE step and ONE variable.
+   Copied (extracted) values are outputs, not variables.
+3. Choose things the user clicked by their relation to the variables (e.g. the product
+   that best matches {{query}}), not by their literal names.
+   Email example: click "the button that starts a new email", fill "the recipient (To)
+   field" with {{recipient}}, fill "the subject field" with {{subject}}, fill "the message
+   body" with {{body}}, click "the button that sends the email", verify "a confirmation
+   that the email was sent".
+4. Mark optional=true for steps a similar site may not have (quantity box, size or
    colour picker, cookie banner) and for extract steps whose data may be missing
    (e.g. manufacturer link).
-5. After an important state change add a verify step for its observable effect.
-6. NEVER include checkout, login, registration, address or payment steps.
+5. End with a verify step for the final action's observable effect (e.g. "the basket
+   count increased or the product was added", "a confirmation that the email was sent").
+6. NEVER include checkout, login, registration, address or payment steps. (Sending an
+   email the user composed is fine.)
 7. "goal" is one sentence written in terms of the variables and outputs.
 
 Return ONLY JSON with this shape:
@@ -87,6 +102,10 @@ def lint(p: IntentProgram, copied: list[str]) -> tuple[list[str], list[str]]:
                 errors.append(f"extract step {i} has no output name")
             elif s.output not in p.outputs:
                 errors.append(f"extract step {i} output {s.output!r} missing from outputs")
+    for name, val in p.variables.items():
+        if re.sub(r"\W+", "_", val.strip().lower()).strip("_") == name.lower():
+            errors.append(f"variable {{{{{name}}}}} is named after its value; name it by its role "
+                          f"(e.g. query, quantity, size, recipient)")
     for name in p.variables.keys() - used:
         warnings.append(f"variable {name!r} is never used")
     if not any(s.op == "verify" for s in p.steps):

@@ -86,8 +86,10 @@ RECORDER_JS = r"""
       send({kind: 'select', el: describe(el), value: clean(el.options[el.selectedIndex]?.text)});
     else if (el.type === 'checkbox' || el.type === 'radio')
       send({kind: 'check', el: describe(el), value: String(el.checked)});
-    else
+    else if (recorded.get(el) !== clean(el.value)) {     // not already sent via Enter
       send({kind: 'fill', el: describe(el), value: el.value});
+      recorded.set(el, clean(el.value));
+    }
   }, true);
 
   // Enter in a search box (often submits without a 'change' firing first)
@@ -95,9 +97,30 @@ RECORDER_JS = r"""
     const el = e.target;
     if (e.key !== 'Enter' || !el.matches || !el.matches('input') || sensitive(el)) return;
     send({kind: 'fill', el: describe(el), value: el.value});
+    recorded.set(el, clean(el.value));
     send({kind: 'press', el: describe(el), value: 'Enter'});
   }, true);
-    // Copying text means "I want this data" -> becomes an extract step
+  // Rich text boxes (email bodies) never fire 'change'; inputs that turn into chips (email
+  // recipients) may be empty by the time they do. Record what was typed when focus leaves.
+  const EDITABLE = '[contenteditable=""],[contenteditable="true"],[role=textbox]';
+  const typed = new WeakMap(), recorded = new WeakMap();
+  const editableOf = t => { const el = t.closest && t.closest(EDITABLE); return el && el.isContentEditable ? el : null; };
+  document.addEventListener('input', e => {
+    const el = editableOf(e.target) || (e.target.matches && e.target.matches('input,textarea') ? e.target : null);
+    if (!el || sensitive(el)) return;
+    const v = el.isContentEditable ? el.innerText : el.value;
+    if (clean(v)) typed.set(el, v);
+  }, true);
+  document.addEventListener('focusout', e => {
+    const el = editableOf(e.target) || (e.target.matches && e.target.matches('input,textarea') ? e.target : null);
+    if (!el || sensitive(el) || !typed.has(el)) return;
+    const v = clean(el.isContentEditable ? el.innerText : (el.value || typed.get(el)));
+    if (!v || recorded.get(el) === v) return;
+    recorded.set(el, v);
+    send({kind: 'fill', el: describe(el), value: v.slice(0, 2000)});
+  }, true);
+
+  // Copying text means "I want this data" -> becomes an extract step
   document.addEventListener('copy', () => {
     const sel = document.getSelection();
     const text = clean(sel ? sel.toString() : '');
@@ -170,11 +193,6 @@ async def record(start_url: str, *,
     return Trace(start_url=start_url, events=events)
 
 # ---------- CLI ----------
-def _print(ev: dict):
-    el = ev.get("el", {})
-    what = el.get("label") or el.get("aria_label") or el.get("placeholder") or el.get("text") or el.get("css", "")
-    print(f"[rec] {ev['kind']:8} {what[:50]!r:52} {ev.get('value') or ''}")
-
 def _print(ev: dict):
     if ev["kind"] == "navigate":
         print(f"[rec] navigate -> {ev['url']}")

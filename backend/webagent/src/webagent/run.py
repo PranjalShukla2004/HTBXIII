@@ -16,6 +16,12 @@ MAX_ASKS = 3
 PAGE_CHANGING = {"search", "click", "press", "click_text"}
 CACHE_KEYS = ("tag", "type", "label", "aria", "ph", "name", "text", "href")
 QTY_VAR = re.compile(r"qty|quantit", re.I)
+SEARCHY = re.compile(r"search|magnif|find", re.I)
+SHOP_WORDS = re.compile(r"\b(cart|basket|bag|trolley)\b", re.I)
+
+def is_shopping(program: "IntentProgram") -> bool:
+    """Basket checks, sizes and quantities only make sense for add-to-basket skills."""
+    return any(SHOP_WORDS.search(s.target or "") for s in program.steps)
 
 AskFn = Callable[[str, str, list[str]], Awaitable[Optional[str]]]
 
@@ -24,14 +30,15 @@ CART_CHECK = ("The product was just added to the shopping basket/bag: a confirma
               "If a size/colour picker is still waiting for a choice, or a message like "
               "'please select a size' is shown, it was NOT added.")
 
-GROUND_SYSTEM = """You operate a web browser on an online shop you have never seen before.
-You get the remaining steps of a site-independent shopping program, the current page,
-and a numbered list of the page's interactive elements.
+GROUND_SYSTEM = """You operate a web browser on a website you have never seen before: an online
+shop, an email client (Gmail, Outlook, ...) or another web app. You get the remaining steps
+of a site-independent program, the current page, and a numbered list of the page's
+interactive elements.
 
 Plan the actions to take ON THIS PAGE, starting with the FIRST remaining step. Continue
 with the following steps only while they can be done on this same page, and STOP after
 any action that loads a new page or substantially changes it (submitting a search,
-opening a product, adding to cart, opening the basket).
+opening a product, adding to cart, opening the basket, opening a new email, sending).
 
 Return ONLY JSON:
 {"actions": [
@@ -71,6 +78,9 @@ Choose the action from the ELEMENT you found, not from the step's wording:
 - text or number input -> "fill"; the shop's search box -> "search" (types and presses Enter)
 - a search step is only ok once the query is typed and submitted; clicking a search icon
   or link that just opens the search box is "click" with status "partial"
+- if the shop has NO search box, a category or menu link matching the query (e.g. "Laptops"
+  for "laptop") does the search step: "click" it with status "ok". This includes categories
+  that filter the page in place without changing the URL. Never click the same category twice.
 - <select> -> "select", value = the EXACT option text from its options list (options may
   read like "Qty: 2" or "2 items"; return that exact text). This includes elements marked
   "(hidden native dropdown)": shops often hide the real <select> behind a styled button.
@@ -88,6 +98,10 @@ Choose the action from the ELEMENT you found, not from the step's wording:
 - quantity shown with +/- buttons -> "click" the + button with repeat = target minus the
   current value; if the current value already equals the target -> already_done
 - no quantity control at all on the product page -> not_found (the step is optional)
+- rich text areas marked "(editable text)", e.g. an email body -> "fill" with the text
+- an email's recipient/To field -> "fill" with the address (it may turn into a chip: fine)
+- the new email window may take a moment to open: if the compose fields are not visible
+  yet but a "New mail"/"Compose" button is, click it with status "partial"
 - checkbox/radio -> "check" with value "true" or "false"
 - buttons, links, product tiles, colour/size swatches -> "click"
 
@@ -95,6 +109,12 @@ Rules:
 - USER CHOICES in the prompt are answers the shopper already gave. Use them: map to the
   closest available option (e.g. "M" -> "M (UK 10)", "32" -> "W32"). Only ask again
   (needs_input) if no available option is reasonably close.
+- USER CHOICES can also be constraints such as max_price, budget, brand or colour: when
+  choosing a product, pick one that satisfies them (compare the prices shown in ctx). If
+  none does, pick the closest and say so in "reason".
+- The add-to-basket step only makes sense on a single product's page. If you are on a home,
+  search or category page instead, return "move" with the product that best matches the
+  item (and USER CHOICES) to open its page.
 - If a NOTE is given, follow it: it explains what went wrong on the previous attempt.
 - Match by meaning: "Add to basket", "Add to bag", "Add", "Buy" (on a product page) all
   mean add to cart.
@@ -230,6 +250,34 @@ async def verify(page: Page, condition: str, limit: int = 4000) -> dict:
     return await llm_json(VERIFY_SYSTEM, f"CONDITION: {condition}\n\nPAGE TEXT:\n{text}",
                           tag="verify", cheap=True)
 
+FORM_TEXT_JS = r"""() => [...document.querySelectorAll('input,textarea,[contenteditable=""],[contenteditable="true"]')]
+  .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+  .map(e => (e.isContentEditable ? e.innerText : e.value) || '').join(' \n ')"""
+
+async def verify_outcome(page: Page, condition: str, typed: Optional[list[str]] = None) -> dict:
+    """Final check for non-shopping skills. If the text typed into the form (subject, body, ...)
+    is no longer in any visible field, the form was submitted (e.g. the email was sent and the
+    compose window closed). Otherwise ask the model, using toasts/status messages and page text."""
+    await page.wait_for_timeout(1500)
+    typed = [t.strip().lower() for t in (typed or []) if t and len(t.strip()) >= 2]
+    if typed:
+        try:
+            fields = (await page.evaluate(FORM_TEXT_JS)).lower()
+            if not any(t in fields for t in typed):
+                return {"passed": True, "evidence": "the form closed and the typed text is gone"}
+        except Exception:
+            pass
+    signals = await cart_signals(page)
+    text = await page_text(page, limit=5000)
+    user = (f"CONDITION: {condition}\n"
+            "HOW TO JUDGE: if the last action submitted a form or sent a message, it worked when "
+            "the form/compose window has closed or been cleared, or a 'sent' message shows. It did "
+            "NOT work if the form still shows the typed recipient/subject/text, an error, or a "
+            "recipient that was not accepted.\n\nNOTIFICATIONS AND STATUS MESSAGES:\n"
+            + ("\n".join(f"- {s}" for s in signals) or "- (none found)")
+            + f"\n\nPAGE TEXT:\n{text}")
+    return await llm_json(VERIFY_SYSTEM, user, tag="verify", cheap=True)
+
 async def verify_cart(page: Page) -> dict:
     """Basket check: popups/toasts/basket icons first, then the page text."""
     await page.wait_for_timeout(1500)             # "added" popups often animate in late
@@ -269,6 +317,9 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
     final_verify = verify_idx[-1] if verify_idx else None
     action_idx = [k for k, s in enumerate(steps) if s.op not in ("verify", "extract")]
     add_step = action_idx[-1] if action_idx else None
+    shopping = is_shopping(program)
+    if not shopping:
+        add_step = None          # no basket check / extra adds; the skill's own final verify runs
     result = SiteResult(url=url, status="navigating", variables=vars_)
     cache = load_cache(program, url)
     performed: dict[int, list[dict]] = {}
@@ -316,6 +367,9 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                     while j < len(steps) and steps[j].op == "extract":
                         fields[steps[j].output or f"field_{j}"] = render(steps[j].target, vars_)
                         j += 1
+                    if shopping:                            # the results table always wants these
+                        fields.setdefault("product_name", "the main product's name")
+                        fields.setdefault("price", "the main product's price with currency symbol")
                     vals = await extract(page, fields)
                     result.outputs.update(vals)
                     result.outputs.setdefault("product_url", page.url)
@@ -326,14 +380,16 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                 if step.op == "verify":
                     # the basket check after adding replaces the skill's own verify steps
                     if add_step is not None or i != final_verify:
-                        emit("log", f"skipped verify {i} (basket check covers it)")
+                        emit("log", f"skipped verify {i} (basket check covers it)" if add_step is not None
+                             else f"skipped intermediate verify {i}")
                         i += 1
                         continue
                     target = render(step.target, vars_)
-                    v = await verify(page, target)
-                    emit("step", f"verify '{target}': {v.get('passed')} ({v.get('evidence')})", step=i)
-                    if not v.get("passed") and not step.optional:
-                        raise StepFailed(f"verify failed: {target}")
+                    typed = [render(s.value, vars_) for s in steps[:i] if s.op == "fill" and s.value]
+                    v = await verify_outcome(page, target, typed)
+                    if not v.get("passed"):
+                        raise StepFailed(f"not confirmed: {target} ({v.get('evidence')})")
+                    emit("step", f"verify '{target}': True ({v.get('evidence')})", step=i, passed=True)
                     i += 1
                     continue
 
@@ -384,8 +440,10 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                     if steps[i].op == "search":
                         if action == "fill":
                             action = "search"                   # typing into search = submit it too
-                        if status == "ok" and action not in ("search", "press"):
-                            status = "partial"                  # icon click only opened the box
+                        if status == "ok" and action not in ("search", "press") and el is not None \
+                                and SEARCHY.search(" ".join(str(el.get(k, "")) for k in
+                                                            ("text", "aria", "title", "ph", "name", "href", "label"))):
+                            status = "partial"                  # search icon click only opened the box
                     text_click = action == "click_text" and bool(a.get("value"))
                     repeat = max(1, min(int(a.get("repeat") or 1), MAX_REPEAT))
                     last_reason = a.get("reason", "")
@@ -467,9 +525,19 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                         i, hops = i + 1, 0
                         continue
                     if status not in ("ok", "partial", "move"):
+                        if steps[i].op == "search" and nudge(
+                                i,
+                                "There is no usable search box here. Click a category or menu link that "
+                                "matches the query (status ok), or move to a 'Products'/'Shop' page that "
+                                "has a search box.",
+                                "no search box; looking for a matching category instead"):
+                            replan = True
+                            break
                         if i == add_step and nudge(
                                 i,
-                                "If a size or other option has to be chosen first: click the visible option "
+                                "If this is not a single product's page, return move with the product that best "
+                                "matches the item to open it. If a size or other option has to be chosen first: "
+                                "click the visible option "
                                 "matching USER CHOICES (click, or click_text with its visible text), or click "
                                 "add-to-basket with status partial to reveal the options, or return "
                                 "needs_input with the options you can see.",

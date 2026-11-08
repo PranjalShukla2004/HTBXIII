@@ -20,6 +20,8 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 CHROMIUM_PATH = os.getenv("CHROMIUM_PATH") or None
 PROFILE_DIR = Path(os.getenv("PROFILE_DIR", str(REPO_ROOT / ".agent-profile")))
+# Cookies exported from the agent profile so isolated (parallel) runs are signed in too.
+AUTH_STATE = Path(os.getenv("AUTH_STATE", str(REPO_ROOT / ".agent-auth.json")))
 DEFAULT_SHEET_URL = os.getenv("DEFAULT_SHEET_URL") or None
 
 if not GEMINI_API_KEY:
