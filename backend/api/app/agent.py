@@ -22,13 +22,14 @@ class AgentBackend:
             return await abstract(trace)
 
     async def run(self, url, program, arguments, *, on_event, on_action, on_llm):
-        from webagent.browser import launch
+        from webagent.browser import launch_isolated
         from webagent.llm import observe_llm
         from webagent.run import run_program
 
         with observe_llm(on_llm):
-            # Follow the project's HEADLESS setting (default 0 = visible Chrome window), like the CLI.
-            async with launch() as browser:
+            # One throwaway browser per run, so several sites can run side by side (a shared
+            # persistent profile can only be open in one browser at a time). Follows HEADLESS.
+            async with launch_isolated() as browser:
                 return await run_program(browser, url, program, variables=arguments,
                                          on_event=on_event, on_action=on_action)
 

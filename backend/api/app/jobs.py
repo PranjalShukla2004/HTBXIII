@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import shutil
 import threading
 import time
@@ -53,7 +54,8 @@ class Job:
 
 class JobManager:
     def __init__(self, store, backend, state_dir, *, run_timeout=600,
-                 recording_timeout=3600, history_limit=512, retained_jobs=100):
+                 recording_timeout=3600, history_limit=512, retained_jobs=100,
+                 max_parallel_runs=None):
         self.store = store
         self.backend = backend
         self.state_dir = Path(state_dir)
@@ -62,7 +64,10 @@ class JobManager:
         self.history_limit = history_limit
         self.retained_jobs = retained_jobs
         self.jobs: dict[str, Job] = {}
-        self._active: str | None = None
+        # Runs on different sites may overlap (each has its own browser); recordings and
+        # plans need the agent to themselves.
+        self.max_parallel_runs = max_parallel_runs or int(os.getenv("MAX_PARALLEL_RUNS", "4"))
+        self._active: set[str] = set()
         self._closing = False
 
     def get(self, job_id):
@@ -79,11 +84,26 @@ class JobManager:
         except (ValueError, OSError):
             raise ServiceError(422, "invalid_skill", "The saved skill is invalid") from None
 
+    def active_jobs(self):
+        return [self.jobs[job_id] for job_id in self._active if job_id in self.jobs]
+
+    def skill_busy(self, skill_id):
+        return any(job.skill_id == skill_id for job in self.active_jobs())
+
+    def _admit(self, kind):
+        active = self.active_jobs()
+        if not active:
+            return
+        if kind != "run" or any(job.kind != "run" for job in active):
+            raise ServiceError(409, "busy", "A recording or skill run is already active")
+        if len(active) >= self.max_parallel_runs:
+            raise ServiceError(409, "busy", f"Already running {len(active)} sites in parallel "
+                                            f"(max {self.max_parallel_runs})")
+
     def _create(self, kind, skill_id, url):
         if self._closing:
             raise ServiceError(503, "shutting_down", "The API is shutting down")
-        if self._active is not None:
-            raise ServiceError(409, "busy", "A recording or skill run is already active")
+        self._admit(kind)
         while len(self.jobs) >= self.retained_jobs:
             oldest = next((j for j in self.jobs.values() if j.status in TERMINAL), None)
             if oldest is None:
@@ -95,7 +115,7 @@ class JobManager:
         job = Job(job_id, kind, skill_id, url, streams)
         job.console_log = self.state_dir / job_id / "console.log"
         self.jobs[job_id] = job
-        self._active = job_id
+        self._active.add(job_id)
         self._status(job, "queued")
         return job
 
@@ -141,8 +161,7 @@ class JobManager:
                 logger.error("Unhandled job failure", exc_info=task.exception())
                 if job.status not in TERMINAL:
                     self._finish(job, "failed", error={"code": "execution_failed", "message": "Execution failed"})
-            if self._active == job.id:
-                self._active = None
+            self._active.discard(job.id)
 
         job.task.add_done_callback(complete)
 

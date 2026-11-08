@@ -148,6 +148,19 @@ def test_plan_validation_failure_and_active_job_protection(make_app):
         assert frames[-1]["type"] == "failed"
         assert "private planner failure" not in json.dumps(frames)
 
+def test_runs_on_different_sites_overlap_up_to_the_limit(make_app):
+    backend = FakeBackend(block=True)
+    with TestClient(make_app(backend, max_parallel_runs=2)) as client:
+        first = start(client)
+        second = start(client, url="https://other.example")
+        assert first.status_code == second.status_code == 202
+        assert start(client, url="https://third.example").status_code == 409
+        # Recordings and plans still need the agent to themselves.
+        assert client.post("/api/skills/shopping_demo/plans", json={"prompt": "Find a ps5"}).status_code == 409
+        assert client.delete("/api/skills/shopping_demo").status_code == 409
+        for job in (first.json(), second.json()):
+            client.post(f'/api/jobs/{job["job_id"]}/cancel')
+        assert start(client, url="https://third.example").status_code == 202
 
 def test_skill_names_persist_without_rewriting_the_intent_and_delete_removes_metadata(make_app):
     app = make_app()
@@ -352,7 +365,7 @@ def test_shutdown_cancels_the_worker_and_releases_admission(make_app):
         assert backend.started.wait(2)
     assert backend.cleaned.is_set()
     assert app.state.manager.get(job["job_id"]).status == "cancelled"
-    assert app.state.manager._active is None
+    assert not app.state.manager._active
 
 
 def test_frontend_gets_all_job_text_and_complete_saved_log(make_app):

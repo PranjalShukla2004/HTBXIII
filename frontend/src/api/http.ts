@@ -6,6 +6,8 @@ import type { ConnectionState } from './websocket.ts'
 import type { AgentApi, RecordingEvent, RunEvent, Skill, SkillDraft, Unsubscribe } from './types.ts'
 
 const BASE = (import.meta.env?.VITE_API_URL as string | undefined) ?? 'http://localhost:8000'
+/** Sites shopped at the same time after the first one. Keep in step with MAX_PARALLEL_RUNS on the backend. */
+const MAX_PARALLEL = Math.max(1, Number(import.meta.env?.VITE_MAX_PARALLEL ?? 4) || 4)
 const abortError = () => new DOMException('Stopped.', 'AbortError')
 const isAbort = (error: unknown) => error instanceof Error && error.name === 'AbortError'
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
@@ -150,8 +152,8 @@ export function createHttpApi(baseUrl: string): AgentApi {
         choices: Object.assign({}, ...plans.map((plan) => plan.choices)),
         targets: targets.map(({ id, url, name, plan }) => ({ id, url, name, skillId: plan.skill.id })) })
       const label = (status: string) => status === 'done' ? 'Done' : status === 'needs_human' ? 'Needs attention' : status === 'cancelled' ? 'Stopped' : 'Failed'
-      const results: { target: typeof targets[number]; job: BackendJob; lastUrl?: string; note: string }[] = []
-      for (const target of targets) {
+      type TargetResult = { target: typeof targets[number]; job: BackendJob; lastUrl?: string; note: string }
+      const runTarget = async (target: typeof targets[number]): Promise<TargetResult> => {
         if (signal.aborted) throw abortError()
         const job = await post<BackendJob>(`/api/skills/${encodeURIComponent(target.plan.skill.id)}/runs`, {
           url: target.url, arguments: target.plan.variables,
@@ -172,8 +174,20 @@ export function createHttpApi(baseUrl: string): AgentApi {
           Site: target.name, Status: label(final.status),
           ...Object.fromEntries(Object.entries(result?.outputs ?? {}).map(([key, value]) => [key, cell(value)])),
         }, message: note || undefined, detail: detail || undefined })
-        results.push({ target, job: final, lastUrl: seen.lastUrl, note })
+        return { target, job: final, lastUrl: seen.lastUrl, note }
       }
+      // The first site runs alone (it warms the cache and surfaces problems early);
+      // the rest share a pool of up to MAX_PARALLEL browsers, each in its own window.
+      const results: TargetResult[] = new Array(targets.length)
+      results[0] = await runTarget(targets[0])
+      let next = 1
+      const worker = async () => {
+        while (next < targets.length) {
+          const index = next++
+          results[index] = await runTarget(targets[index])
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL, targets.length - 1) }, worker))
       // One row per site, with only the columns the backend actually returned.
       const outputKeys = [...new Set(results.flatMap(({ job }) => Object.keys(job.result?.outputs ?? {})))]
       const showPage = !outputKeys.includes('product_url') && results.some(({ lastUrl }) => lastUrl)

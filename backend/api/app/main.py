@@ -18,12 +18,13 @@ from .storage import SkillStore
 
 def create_app(*, data_dir=None, state_dir=None, backend=None, run_timeout=600,
                recording_timeout=3600, history_limit=512, retained_jobs=100,
-               send_timeout=10, origins=None):
+                send_timeout=10, origins=None, max_parallel_runs=None):
     store = SkillStore(Path(data_dir) if data_dir is not None else AGENT_ROOT / "data")
     manager = JobManager(store, backend if backend is not None else AgentBackend(),
-                         state_dir if state_dir is not None else Path(__file__).resolve().parents[1] / "data",
-                         run_timeout=run_timeout, recording_timeout=recording_timeout,
-                         history_limit=history_limit, retained_jobs=retained_jobs)
+                        state_dir if state_dir is not None else Path(__file__).resolve().parents[1] / "data",
+                        run_timeout=run_timeout, recording_timeout=recording_timeout,
+                        history_limit=history_limit, retained_jobs=retained_jobs,
+                        max_parallel_runs=max_parallel_runs)
     allowed_origins = origins if origins is not None else [
         value.strip() for value in os.getenv("FRONTEND_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173").split(",")
@@ -82,7 +83,7 @@ def create_app(*, data_dir=None, state_dir=None, backend=None, run_timeout=600,
     @app.delete("/api/skills/{skill_id}", status_code=204)
     async def delete_skill(skill_id: str):
         manager.skill(skill_id)
-        if manager._active and manager.get(manager._active).skill_id == skill_id:
+        if manager.skill_busy(skill_id):
             raise ServiceError(409, "skill_busy", "Wait for this skill's active job to finish before deleting it")
         store.delete(skill_id)
         return Response(status_code=204)
