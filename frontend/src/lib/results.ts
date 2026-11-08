@@ -15,6 +15,8 @@ export interface Found {
   rating?: number
   extras: [string, string][]
   overBudget: boolean
+  /** Read from the product page, but the site couldn't put it in the basket. */
+  notInBasket: boolean
 }
 
 const UNIT_KEYS = ['unit', 'price', 'each', 'Price', 'Each']
@@ -71,7 +73,7 @@ export function foundResults(run: RunState): Found[] {
   const qtyAsked = quantity(run)
   const out: Found[] = []
   for (const t of run.targets) {
-    if (t.status !== 'ok' || !t.result) continue
+    if ((t.status !== 'ok' && t.status !== 'found') || !t.result) continue
     const r = t.result
     const unitRaw = pick(r, UNIT_KEYS)
     const totalRaw = pick(r, TOTAL_KEYS)
@@ -91,6 +93,7 @@ export function foundResults(run: RunState): Found[] {
       extras: Object.entries(r).filter(([k, v]) => !HIDDEN.test(k) && v !== '' && v != null).map(([k, v]) => [k.replace(/_/g, ' '), String(v)]),
       // A price in another currency (e.g. Rs. 500 against a £ budget) can't be compared.
       overBudget: budget && (!stated || stated === budget.cur) ? unit > budget.amount : false,
+      notInBasket: t.status === 'found',
     })
   }
   // Under budget first, then cheapest.

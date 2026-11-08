@@ -15,6 +15,13 @@ const cell = (value: unknown): string | number => value == null ? '—' :
   typeof value === 'string' || typeof value === 'number' ? value : JSON.stringify(value)
 /** Different products a site put in the basket (only when the shopper asked for constraints). */
 const itemsOf = (job: BackendJob) => Array.isArray(job.result?.items) ? job.result.items.filter(isRecord) : []
+const filled = (value: unknown) => value != null && String(value).trim() !== ''
+/**
+ * The run stopped after it had read the product (its name and price; the link comes with them):
+ * a result to compare, not a failure, even though it didn't reach the basket.
+ */
+const foundOnly = (job: BackendJob) => job.status === 'failed' &&
+  filled(job.result?.outputs?.product_name) && filled(job.result?.outputs?.price)
 const cells = (record: Record<string, unknown>) => Object.fromEntries(Object.entries(record).map(([key, value]) => [key, cell(value)]))
 
 interface RunSession {
@@ -170,7 +177,8 @@ export function createHttpApi(baseUrl: string): AgentApi {
         choices: Object.assign({}, ...plans.map((plan) => plan.choices)),
         constraints: plans.find((plan) => plan.constraints)?.constraints,
         targets: targets.map(({ id, url, name, plan }) => ({ id, url, name, skillId: plan.skill.id })) })
-      const label = (status: string) => status === 'done' ? 'Done' : status === 'needs_human' ? 'Needs attention' : status === 'cancelled' ? 'Stopped' : 'Failed'
+      const label = (job: BackendJob) => job.status === 'done' ? 'Done' : job.status === 'needs_human' ? 'Needs attention'
+        : job.status === 'cancelled' ? 'Stopped' : foundOnly(job) ? 'Found' : 'Failed'
       type TargetResult = { target: typeof targets[number]; job: BackendJob; lastUrl?: string; note: string }
       const runTarget = async (target: typeof targets[number]): Promise<TargetResult> => {
         if (signal.aborted) throw abortError()
@@ -189,15 +197,18 @@ export function createHttpApi(baseUrl: string): AgentApi {
         session.asking.delete(target.id)
         if (final.status === 'cancelled') throw abortError()
         const result = final.result
-        const status = final.status === 'done' ? 'ok' : final.status === 'needs_human' ? 'needs_human' : 'failed'
+        const found = foundOnly(final)
+        const status = final.status === 'done' ? 'ok' : final.status === 'needs_human' ? 'needs_human' : found ? 'found' : 'failed'
         // Agent errors live in result.error; service failures such as a timeout in job.error.
         const detail = result?.error || final.error?.message || ''
-        const note = detail ? describeError(detail) : result?.note ? `${result.note[0].toUpperCase()}${result.note.slice(1)}` : ''
+        const why = detail ? describeError(detail) : ''
+        const note = found ? (/^The item didn’t reach the basket/.test(why) ? why : `Not added to the basket.${why ? ` ${why}` : ''}`)
+          : why || (result?.note ? `${result.note[0].toUpperCase()}${result.note.slice(1)}` : '')
         const items = itemsOf(final)
         const wanted = target.plan.constraints?.items ?? 1
         if (result?.screenshot) emit({ type: 'frame', targetId: target.id, image: new URL(result.screenshot, base).href, final: true })
         emit({ type: 'target_done', targetId: target.id, status, result: {
-          Site: target.name, Status: label(final.status),
+          Site: target.name, Status: label(final),
           ...cells(Object.fromEntries(Object.entries(result?.outputs ?? {}).filter(([key]) => key !== 'items'))),
           ...(wanted > 1 ? { Items: `${items.length} of ${wanted}` } : {}),
         }, message: note || undefined, detail: detail || undefined, items: items.length ? items.map(cells) : undefined })
@@ -223,7 +234,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
       const columns = ['Site', 'Status', ...(showItem ? ['Item'] : []), ...outputKeys, ...(showPage ? ['Final page'] : []), ...(showNotes ? ['Notes'] : [])]
       const rows = results.flatMap(({ target, job, lastUrl, note }) => {
         const products = itemsOf(job)
-        return (products.length ? products : [{}]).map((product, index) => [target.name, label(job.status),
+        return (products.length ? products : [{}]).map((product, index) => [target.name, label(job),
           ...(showItem ? [products.length ? `${index + 1} of ${products.length}` : '—'] : []),
           ...outputKeys.map((key) => cell(key in product ? product[key] : job.result?.outputs?.[key])),
           ...(showPage ? [lastUrl ?? '—'] : []), ...(showNotes ? [index === 0 ? note || '—' : ''] : [])])
@@ -237,7 +248,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
           const outputs = job.result?.outputs ?? {}
           const products = itemsOf(job)
           return (products.length ? products : [outputs]).map((product) => [target.name, text(product.product_name), text(product.price),
-            job.status === 'done' ? text(product.product_url) : '', label(job.status), note])
+            job.status === 'done' || foundOnly(job) ? text(product.product_url) : '', label(job), note])
         })
         emit({ type: 'log', level: 'info', ts: new Date().toISOString(), message: `Writing ${sheetRows.length} rows to your Google Sheet…` })
         try {
@@ -249,12 +260,15 @@ export function createHttpApi(baseUrl: string): AgentApi {
         }
       }
       const completed = results.filter(({ job }) => job.status === 'done').length
+      const foundCount = results.filter(({ job }) => foundOnly(job)).length
       const basket = results.reduce((n, { job }) => n + (job.status === 'done' ? itemsOf(job).length : 0), 0)
       const itemsText = basket > 1 ? ` ${basket} different items in baskets.` : ''
-      const outcome = results.some(({ job }) => job.status === 'needs_human') ? 'needs_human' : completed < results.length ? 'failed' : 'done'
-      emit({ type: 'done', status: outcome, summary: (outcome === 'done' ? `Completed ${results.length} ${results.length === 1 ? 'site' : 'sites'}.` :
-        outcome === 'needs_human' ? `${completed} of ${results.length} sites completed. The agent needs your attention on the rest.` :
-        `${completed} of ${results.length} sites completed. Check the site details and activity.`) + itemsText + sheetNote,
+      const foundText = foundCount ? ` ${foundCount} more found the product but couldn’t add it to the basket.` : ''
+      const outcome = results.some(({ job }) => job.status === 'needs_human') ? 'needs_human' : completed + foundCount < results.length ? 'failed' : 'done'
+      emit({ type: 'done', status: outcome, summary: (outcome === 'done' && !foundCount ? `Completed ${results.length} ${results.length === 1 ? 'site' : 'sites'}.` :
+        outcome === 'needs_human' ? `${completed} of ${results.length} sites completed.${foundText} The agent needs your attention on the rest.` :
+        outcome === 'done' ? `${completed} of ${results.length} sites completed.${foundText}` :
+        `${completed} of ${results.length} sites completed.${foundText} Check the site details and activity.`) + itemsText + sheetNote,
         table: { columns, rows } })
     } catch (error) {
       await Promise.allSettled([...session.jobs].map(cancel))

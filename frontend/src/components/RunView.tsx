@@ -31,7 +31,7 @@ export function RunView({ msgId, skillIds, run }: { msgId: string; skillIds: str
 
   const skill = skills.find((s) => s.id === skillIds[0])
   const kind: 'shop' | 'quote' = skill && /shop|mart|store|cart/i.test(skill.name + skill.site.url) ? 'shop' : 'quote'
-  const done = run.targets.filter((t) => ['ok', 'failed', 'needs_human', 'stopped'].includes(t.status)).length
+  const done = run.targets.filter((t) => ['ok', 'found', 'failed', 'needs_human', 'stopped'].includes(t.status)).length
   const reconnecting = Object.values(run.connections ?? {}).includes('reconnecting')
   const found = foundResults(run)
   const budget = budgetOf(run)
@@ -265,7 +265,7 @@ function Cell({ value, column }: { value: string | number; column: string }) {
     )
   }
   if (column === 'Status') {
-    const tone = value === 'Done' ? 'text-fg' : value === 'Needs attention' ? 'text-fuzzy' : value === 'Failed' ? 'text-heal' : 'text-fg-3'
+    const tone = value === 'Done' || value === 'Found' ? 'text-fg' : value === 'Needs attention' ? 'text-fuzzy' : value === 'Failed' ? 'text-heal' : 'text-fg-3'
     return <span className={tone}>{value}</span>
   }
   if (column === 'Notes') return <span className="block max-w-[420px] text-[13px] leading-snug">{value}</span>

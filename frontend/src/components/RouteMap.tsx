@@ -2,7 +2,8 @@ import { Check, Hand, X } from 'lucide-react'
 import type { TargetState } from '../store'
 import { TIER_META, cx, siteColor } from '../lib/ui'
 
-const STATUS = { queued: 'queued', running: 'running', ok: 'completed', failed: 'failed', needs_human: 'needs attention', stopped: 'stopped' } as const
+const STATUS = { queued: 'queued', running: 'running', ok: 'completed', found: 'found the product, not added to the basket',
+  failed: 'failed', needs_human: 'needs attention', stopped: 'stopped' } as const
 
 /** The step a site stopped on: the backend names it in errors like "step 7 (...)"; otherwise the step it was working on. */
 function stopStep(t: TargetState, n: number) {
@@ -38,9 +39,10 @@ export function RouteMap({ steps, targets, title, selected, onPick }: {
       <div className="space-y-0.5">
         {targets.map((t) => {
           const asking = t.status === 'running' && !!t.question
-          const stuck = t.status === 'needs_human' || t.status === 'failed'
+          // found: it read the product, then stopped before the basket; marked where it stopped, but not as a failure.
+          const stuck = t.status === 'needs_human' || t.status === 'failed' || t.status === 'found'
           const at = t.status === 'ok' ? n - 1 : stuck ? stopStep(t, n) : Math.min(t.stepIndex, n - 1)
-          const stuckColor = t.status === 'needs_human' || asking ? 'var(--color-fuzzy)' : 'var(--color-heal)'
+          const stuckColor = t.status === 'needs_human' || t.status === 'found' || asking ? 'var(--color-fuzzy)' : 'var(--color-heal)'
           const isSelected = selected === t.id
           const Row = onPick ? 'button' : 'div'
           return (
@@ -77,6 +79,7 @@ export function RouteMap({ steps, targets, title, selected, onPick }: {
                     aria-label={`${t.name}: step ${at + 1} of ${n}, ${asking ? 'waiting for your answer' : STATUS[t.status]}`}
                   >
                     {t.status === 'ok' ? <Check className="size-2.5 text-white" strokeWidth={3.5} />
+                      : t.status === 'found' ? <Check className="size-2.5 text-black" strokeWidth={3.5} />
                       : t.status === 'needs_human' || asking ? <Hand className="size-2.5 text-black" strokeWidth={2.5} />
                       : t.status === 'failed' ? <X className="size-2.5 text-black" strokeWidth={3} /> : null}
                   </span>

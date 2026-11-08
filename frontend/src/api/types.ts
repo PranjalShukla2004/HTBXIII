@@ -139,7 +139,8 @@ export type RunEvent =
   /** The agent received the shopper's answer and carried on. */
   /** perItem: the answer (e.g. a size) is for this site's current product only, not the whole run. */
   | { type: 'answered'; targetId: string; field: string; value: string; perItem?: boolean }
-  | { type: 'target_done'; targetId: string; status: 'ok' | 'failed' | 'needs_human'; result?: Record<string, string | number>; message?: string; detail?: string;
+  /** found: the site read the product (name, price, link) but couldn't put it in the basket. */
+  | { type: 'target_done'; targetId: string; status: 'ok' | 'found' | 'failed' | 'needs_human'; result?: Record<string, string | number>; message?: string; detail?: string;
       /** One entry per different product put in the basket, when several were asked for. */
       items?: Record<string, string | number>[] }
   | { type: 'done'; summary: string; table?: ResultTable; needsApproval?: string; status?: 'done' | 'failed' | 'needs_human' }

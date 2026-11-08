@@ -12,10 +12,10 @@ import { currencyOf, money, parseMoney } from '../lib/results'
 
 const REASON: Record<FocusReason, string> = { heal: 'Self-heal', needs: 'Needs you', price: 'Price found', live: 'Live' }
 const STATUS_LABEL: Record<TargetState['status'], string> = {
-  queued: 'Queued', running: 'Running', ok: 'Completed', failed: 'Failed', needs_human: 'Needs attention', stopped: 'Stopped',
+  queued: 'Queued', running: 'Running', ok: 'Completed', found: 'Found', failed: 'Failed', needs_human: 'Needs attention', stopped: 'Stopped',
 }
 const STATUS_TEXT: Record<TargetState['status'], string> = {
-  queued: 'text-fg-3', running: 'text-accent-2', ok: 'text-fg-2', failed: 'text-heal', needs_human: 'text-fuzzy', stopped: 'text-fg-3',
+  queued: 'text-fg-3', running: 'text-accent-2', ok: 'text-fg-2', found: 'text-fg-2', failed: 'text-heal', needs_human: 'text-fuzzy', stopped: 'text-fg-3',
 }
 const HEAL_MS = 3400
 const itemLabel = (item: Record<string, string | number>) =>
@@ -60,7 +60,7 @@ export function SiteWindow({
   const tier = t.tiers[scene]
   const ring = t.blocked ? 'var(--color-fuzzy)' : tier && tier !== 'skipped' ? TIER_META[tier].color : '#7c6bff'
   const sim = USE_MOCK && !t.frame && t.status !== 'queued'
-  const done = t.status === 'ok'
+  const done = t.status === 'ok' || t.status === 'found'
 
   // Point the cursors at whatever the page marks as being acted on.
   useLayoutEffect(() => {
@@ -158,7 +158,8 @@ export function SiteWindow({
               <span className="flex items-center gap-2">
                 <span className="size-1.5 animate-blink rounded-full bg-accent" /> Watch the agent in its Chrome window
               </span>
-            ) : t.status === 'needs_human' ? 'Needs your attention' : t.status === 'failed' ? 'Could not complete this site' : t.status === 'stopped' ? 'Stopped' : 'Run complete · no screenshot'}
+            ) : t.status === 'needs_human' ? 'Needs your attention' : t.status === 'failed' ? 'Could not complete this site'
+              : t.status === 'found' ? 'Found the product · not added to the basket' : t.status === 'stopped' ? 'Stopped' : 'Run complete · no screenshot'}
           </div>
         )}
 

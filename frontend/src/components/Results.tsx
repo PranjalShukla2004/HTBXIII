@@ -124,7 +124,8 @@ function FoundCard({ f, rank, best, onEvidence }: { f: Found; rank: number; best
           {money(f.unit, f.cur)}
         </button>
         {f.qty > 1 && <span className="tabular font-mono text-[11px] text-fg-3">{money(f.total, f.cur)} for {f.qty}</span>}
-        {f.overBudget && <span className="ml-auto text-[11px] text-fuzzy">Over budget</span>}
+        {f.overBudget ? <span className="ml-auto text-[11px] text-fuzzy">Over budget</span>
+          : f.notInBasket && <span className="ml-auto truncate text-[11px] text-fg-3" title={f.target.currentStep}>Not in basket</span>}
       </div>
     </div>
   )
@@ -159,6 +160,7 @@ export function WinnerCard({ found, budget, approve, approved, onApprove, onEvid
           <div className="text-[13px] text-fg-3">Best pick</div>
           <div className="text-[20px] leading-tight font-semibold tracking-[-0.02em]">{win.target.name}</div>
           <div className="truncate text-[13.5px] text-fg-2">{win.product}</div>
+          {win.notInBasket && <div className="truncate text-[12px] text-fg-3" title={win.target.currentStep}>Found, but not added to your basket</div>}
         </div>
         <div className="text-right">
           <button onClick={() => onEvidence(win.target.id)} className="tabular font-mono text-[24px] font-semibold underline decoration-rule-2 decoration-dotted underline-offset-[6px] hover:decoration-accent" title="See where this price came from">
@@ -319,7 +321,8 @@ function BasketBar({ total, limit, qty, cur }: { total: number; limit: number; q
 /* ---------------- Receipt ---------------- */
 
 export function Receipt({ run, steps, stats, shop }: { run: RunState; steps: number; stats?: SkillStats; shop: boolean }) {
-  const ok = run.targets.filter((t) => t.status === 'ok').length
+  // A site that found the product (name, price, link) counts, even if it couldn't add it to the basket.
+  const ok = run.targets.filter((t) => t.status === 'ok' || t.status === 'found').length
   const actions = run.targets.reduce((n, t) => n + t.tiers.filter((x) => x && x !== 'skipped').length, 0)
   const phrases = run.heals.length
   const took = (run.finishedAt ?? Date.now()) - run.startedAt

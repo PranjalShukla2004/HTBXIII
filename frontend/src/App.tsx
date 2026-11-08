@@ -75,7 +75,7 @@ function useRunStatusInTitle() {
   const runs = messages.flatMap((m) => (m.role === 'assistant' && m.kind === 'run' ? [m.run] : []))
   const last = runs[runs.length - 1]
   const status = last?.status
-  const done = last?.targets.filter((t) => t.status === 'ok').length ?? 0
+  const done = last?.targets.filter((t) => t.status === 'ok' || t.status === 'found').length ?? 0
   const total = last?.targets.length ?? 0
 
   useEffect(() => {

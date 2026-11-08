@@ -9,7 +9,8 @@ const uid = () => Math.random().toString(36).slice(2, 10)
 const errText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 export interface TargetState extends RunTarget {
-  status: 'queued' | 'running' | 'ok' | 'failed' | 'needs_human' | 'stopped'
+  /** found: it read the product's name, price and link but couldn't add it to the basket. */
+  status: 'queued' | 'running' | 'ok' | 'found' | 'failed' | 'needs_human' | 'stopped'
   stepIndex: number
   totalSteps: number
   currentStep?: string
@@ -308,7 +309,7 @@ export const useStore = create<Store>((set, get) => {
         if (e.status === 'needs_human') return direct(next, e.targetId, 'needs', 3)
         // Real results always carry Site/Status; only an actual price earns the "Price found" spotlight.
         const priced = !!e.result && Object.keys(e.result).some((key) => /^(unit|price|each|total)$/i.test(key))
-        return e.status === 'ok' && priced ? direct(next, e.targetId, 'price', 2) : next
+        return (e.status === 'ok' || e.status === 'found') && priced ? direct(next, e.targetId, 'price', 2) : next
       }
       case 'done':
         return { ...r, status: e.status ?? 'done', finishedAt: Date.now(), summary: e.summary, table: e.table,
