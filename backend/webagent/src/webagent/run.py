@@ -339,7 +339,9 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
 
                 # ---- fast path: replay (from cache, or the add that just worked when repeating) ----
                 acts = cache.get(str(i))
-                replayable = acts is not None and cacheable(step, acts)
+                # Adding to basket depends on this run's size/colour, so it is never replayed
+                # from an earlier run's cache (only repeated within this run, below).
+                replayable = acts is not None and cacheable(step, acts) and i != add_step
                 if repeating and i == add_step and performed.get(i):
                     acts, replayable = performed[i], True
                 if replayable:
@@ -540,6 +542,7 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                     if cart_retries >= 2:
                         raise StepFailed(f"item was not added to the basket ({v.get('evidence')})")
                     cart_retries += 1
+                    performed.pop(add_step, None)           # keep only the attempt that works
                     hint = ("The basket check did not see the item. If the basket/bag already shows it "
                             "(count went up, or an 'added' message), return already_done. Otherwise look "
                             "for a required choice (size, colour, fit) or an error message, then add it.")
