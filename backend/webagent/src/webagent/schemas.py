@@ -63,3 +63,4 @@ class RunPlan(BaseModel):
     sheet_url: Optional[str] = None
     summary: str = ""
     choices: dict[str, str] = {}      # e.g. {"size": "32"}: pre-answered product options
+    log_to_sheet: bool = False        # the user asked for results in their Google Sheet

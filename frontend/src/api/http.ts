@@ -130,7 +130,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
     const session = runs.get(id)!
     const signal = session.controller.signal
     try {
-      const plans: { skill: Skill; variables: Record<string, string>; choices: Record<string, string>; sites: string[]; summary: string }[] = []
+      const plans: { skill: Skill; variables: Record<string, string>; choices: Record<string, string>; sites: string[]; summary: string; sheetUrl?: string }[] = []
       for (const [index, skillId] of session.skillIds.entries()) {
         if (signal.aborted) throw abortError()
         const skill = skillFromBackend(await req<BackendSkill>(`/api/skills/${encodeURIComponent(skillId)}`))
@@ -140,7 +140,8 @@ export function createHttpApi(baseUrl: string): AgentApi {
         if (result.status !== 'done' || !Array.isArray(result.result?.sites)) throw new Error(result.error?.message || 'The agent could not plan this task.')
         const choices = result.result.choices
         plans.push({ skill, variables: result.result.variables ?? {}, sites: result.result.sites, summary: String(result.result.summary || skill.description),
-          choices: isRecord(choices) ? Object.fromEntries(Object.entries(choices).map(([key, value]) => [key, String(value)])) : {} })
+          choices: isRecord(choices) ? Object.fromEntries(Object.entries(choices).map(([key, value]) => [key, String(value)])) : {},
+          sheetUrl: result.result.log_to_sheet && result.result.sheet_url ? result.result.sheet_url : undefined })
       }
       const targets = plans.flatMap((plan, planIndex) => plan.sites.map((url, index) => {
         let name = url
@@ -156,7 +157,7 @@ export function createHttpApi(baseUrl: string): AgentApi {
       const runTarget = async (target: typeof targets[number]): Promise<TargetResult> => {
         if (signal.aborted) throw abortError()
         const job = await post<BackendJob>(`/api/skills/${encodeURIComponent(target.plan.skill.id)}/runs`, {
-          url: target.url, arguments: target.plan.variables,
+          url: target.url, arguments: target.plan.variables, choices: target.plan.choices,
         })
         session.jobs.add(job.job_id)
         if (signal.aborted) { await cancel(job.job_id); throw abortError() }
@@ -196,11 +197,30 @@ export function createHttpApi(baseUrl: string): AgentApi {
       const rows = results.map(({ target, job, lastUrl, note }) => [target.name, label(job.status),
         ...outputKeys.map((key) => cell(job.result?.outputs?.[key])),
         ...(showPage ? [lastUrl ?? '—'] : []), ...(showNotes ? [note || '—'] : [])])
+      // "Log it in my sheet": the backend types one row per site into the Google Sheet.
+      const sheetUrl = plans.find((plan) => plan.sheetUrl)?.sheetUrl
+      let sheetNote = ''
+      if (sheetUrl && !signal.aborted) {
+        const text = (value: unknown) => value == null ? '' : typeof value === 'string' ? value : String(value)
+        const sheetRows = results.map(({ target, job, note }) => {
+          const outputs = job.result?.outputs ?? {}
+          return [target.name, text(outputs.product_name), text(outputs.price),
+            job.status === 'done' ? text(outputs.product_url) : '', label(job.status), note]
+        })
+        emit({ type: 'log', level: 'info', ts: new Date().toISOString(), message: `Writing ${sheetRows.length} rows to your Google Sheet…` })
+        try {
+          await post('/api/sheets/append', { sheet_url: sheetUrl, rows: sheetRows })
+          sheetNote = ' Results logged to your Google Sheet.'
+        } catch (error) {
+          sheetNote = ` Couldn’t update the sheet: ${message(error)}`
+          emit({ type: 'log', level: 'warn', ts: new Date().toISOString(), message: sheetNote.trim() })
+        }
+      }
       const completed = results.filter(({ job }) => job.status === 'done').length
       const outcome = results.some(({ job }) => job.status === 'needs_human') ? 'needs_human' : completed < results.length ? 'failed' : 'done'
-      emit({ type: 'done', status: outcome, summary: outcome === 'done' ? `Completed ${results.length} ${results.length === 1 ? 'site' : 'sites'}.` :
+      emit({ type: 'done', status: outcome, summary: (outcome === 'done' ? `Completed ${results.length} ${results.length === 1 ? 'site' : 'sites'}.` :
         outcome === 'needs_human' ? `${completed} of ${results.length} sites completed. The agent needs your attention on the rest.` :
-        `${completed} of ${results.length} sites completed. Check the site details and activity.`,
+        `${completed} of ${results.length} sites completed. Check the site details and activity.`) + sheetNote,
         table: { columns, rows } })
     } catch (error) {
       await Promise.allSettled([...session.jobs].map(cancel))

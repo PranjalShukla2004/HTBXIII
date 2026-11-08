@@ -29,8 +29,11 @@ export interface BackendResult {
   skill?: BackendSkill
   summary?: string
   sites?: string[]
-  /** Plan only: product options the user stated (e.g. size). The run endpoint cannot accept them. */
+  /** Plan only: product options the user stated (e.g. size). Sent to each run as `choices`. */
   choices?: Record<string, string>
+  /** Plan only: the Google Sheet to log results to, and whether the user asked for it. */
+  sheet_url?: string | null
+  log_to_sheet?: boolean
   [key: string]: unknown
 }
 

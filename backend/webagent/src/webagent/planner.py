@@ -5,6 +5,7 @@ from .schemas import IntentProgram, RunPlan
 
 STORES_FILE = ROOT / "stores.json"
 SHEET_RE = re.compile(r"https://docs\.google\.com/spreadsheets/d/[\w-]+[^\s'\"]*")
+SHEET_WORDS = re.compile(r"\b(spread\s*sheet|sheets?|google sheet)\b", re.I)
 
 PLAN_SYSTEM = """You turn a user's chat request into a run plan for a browser agent that has
 learned ONE shopping skill. You get the skill's goal, its input variables (with the values
@@ -45,6 +46,7 @@ def _snake(s: str) -> str:
 async def plan_from_chat(message: str, program: IntentProgram) -> RunPlan:
     m = SHEET_RE.search(message)
     sheet_url = m.group(0) if m else DEFAULT_SHEET_URL
+    log_to_sheet = bool(m) or bool(SHEET_WORDS.search(message))
     user = json.dumps({
         "skill_goal": program.goal,
         "inputs_with_recorded_values": program.variables,
@@ -61,4 +63,5 @@ async def plan_from_chat(message: str, program: IntentProgram) -> RunPlan:
     if not sites:
         raise ValueError("planner chose no sites; add shops to stores.json or name them in the message")
     return RunPlan(variables=variables, sites=sites, sheet_url=sheet_url,
-                   summary=out.get("summary", ""), choices=choices)
+                   summary=out.get("summary", ""), choices=choices,
+                   log_to_sheet=log_to_sheet and bool(sheet_url))

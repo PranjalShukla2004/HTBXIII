@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from . import AGENT_ROOT
 from .agent import AgentBackend
 from .jobs import JobManager, ServiceError
-from .models import PlanRequest, RecordingRequest, RunRequest, SkillUpdate
+from .models import PlanRequest, RecordingRequest, RunRequest, SheetAppendRequest, SkillUpdate
 from .storage import SkillStore
 
 
@@ -75,6 +75,10 @@ def create_app(*, data_dir=None, state_dir=None, backend=None, run_timeout=600,
     async def plan_skill(skill_id: str, command: PlanRequest):
         return manager.start_plan(skill_id, command).snapshot()
 
+    @app.post("/api/sheets/append")
+    async def append_sheet(command: SheetAppendRequest):
+        return await manager.append_sheet(command)
+    
     @app.patch("/api/skills/{skill_id}")
     async def update_skill(skill_id: str, command: SkillUpdate):
         manager.skill(skill_id)

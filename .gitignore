@@ -1,4 +1,5 @@
 .env
+.vscode
 backend/webagent/data/
 .venv/
 backend/api/data/

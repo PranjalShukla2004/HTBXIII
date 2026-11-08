@@ -68,6 +68,7 @@ class JobManager:
         # plans need the agent to themselves.
         self.max_parallel_runs = max_parallel_runs or int(os.getenv("MAX_PARALLEL_RUNS", "4"))
         self._active: set[str] = set()
+        self._sheet_lock = asyncio.Lock()
         self._closing = False
 
     def get(self, job_id):
@@ -126,7 +127,7 @@ class JobManager:
             raise ServiceError(422, "unknown_arguments", "Unknown arguments: " + ", ".join(sorted(unknown)))
         job = self._create("run", skill_id, str(request.url))
         arguments = {**program.variables, **request.arguments}
-        self._schedule(job, self._run(job, program, arguments))
+        self._schedule(job, self._run(job, program, arguments, dict(request.choices)))
         return job
 
     def start_plan(self, skill_id, request):
@@ -261,13 +262,16 @@ class JobManager:
     def _llm(self, job, payload):
         job.streams["llm"].publish(payload["type"], {k: v for k, v in payload.items() if k != "type"})
 
-    async def _run(self, job, program, arguments):
+    async def _run(self, job, program, arguments, choices=None):
         self._status(job, "running")
+        if choices:
+            self._log(job, "Shopper choices: " + ", ".join(f"{k}={v}" for k, v in choices.items()))
         result = await self.backend.run(
             job.url, program, arguments,
             on_event=lambda event: self._agent_event(job, event),
             on_action=lambda action: self._action(job, action),
-            on_llm=lambda payload: self._llm(job, payload))
+            on_llm=lambda payload: self._llm(job, payload),
+            **({"choices": choices} if choices else {}))
         payload = result.model_dump(mode="json")
         if result.screenshot:
             destination = self.state_dir / job.id / "screenshot.png"
@@ -277,6 +281,20 @@ class JobManager:
             payload["screenshot"] = f"/api/jobs/{job.id}/screenshot"
         SkillStore.atomic_json(self.state_dir / job.id / "result.json", payload)
         return payload, result.status
+
+    async def append_sheet(self, request):
+        """Type result rows into a Google Sheet, visibly, with the signed-in agent profile."""
+        if any(job.kind == "recording" for job in self.active_jobs()):
+            raise ServiceError(409, "busy", "Finish the recording before writing to the sheet")
+        if self._sheet_lock.locked():
+            raise ServiceError(409, "busy", "Already writing to the sheet")
+        async with self._sheet_lock:
+            try:
+                written = await self.backend.append_sheet(request.sheet_url, request.rows)
+            except Exception as error:
+                logger.exception("Sheet write failed")
+                raise ServiceError(502, "sheet_failed", f"Could not write to the sheet: {error}") from None
+        return {"rows_written": written}
 
     async def _record(self, job, *, replace):
         self._status(job, "recording")

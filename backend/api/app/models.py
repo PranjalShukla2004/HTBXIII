@@ -29,6 +29,14 @@ class TargetCommand(Command):
 
 class RunRequest(TargetCommand):
     arguments: dict[str, ArgumentValue] = Field(default_factory=dict, max_length=50)
+    # Product options from the chat (e.g. {"size": "12"}), used when the shop asks for them.
+    choices: dict[str, ArgumentValue] = Field(default_factory=dict, max_length=20)
+
+
+class SheetAppendRequest(Command):
+    sheet_url: Annotated[str, StringConstraints(pattern=r"^https://docs\.google\.com/spreadsheets/d/[\w-]+.*$",
+                                                max_length=2048)]
+    rows: list[list[Annotated[str, StringConstraints(max_length=2048)]]] = Field(min_length=1, max_length=50)
 
 
 class RecordingRequest(TargetCommand):

@@ -430,7 +430,10 @@ async def run_program(ctx: BrowserContext, url: str, program: IntentProgram, *,
                             break
                         asks += 1
                         if ask is None or asks > MAX_ASKS:
-                            result.status, result.error = "needs_human", question
+                            listed = f" Options: {', '.join(options)}." if options else ""
+                            result.status, result.error = "needs_human", (
+                                f"{question}{listed} Add it to your request "
+                                f"(e.g. \"{field.replace('_', ' ')} {options[0] if options else '10'}\") and run again.")
                             emit("status", "needs_human", reason=question, field=field, options=options)
                             return result
                         emit("status", "needs_input", field=field, question=question,
