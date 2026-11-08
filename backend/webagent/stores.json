@@ -1,8 +1,77 @@
 [
-  {"name": "Demo Web Shop", "url": "https://demowebshop.tricentis.com",
-   "sells": "clothing (jeans, shirts), shoes, computers, electronics, books, jewellery, gift cards"},
-  {"name": "Automation Exercise", "url": "https://automationexercise.com",
-   "sells": "clothing for women, men and kids: tops, t-shirts, dresses, jeans, sarees"},
-  {"name": "Zara", "url": "https://www.zara.com/uk/", "sells": "clothing"},
-  {"name": "ASOS", "url": "https://www.asos.com/", "sells": "clothes"}
+  {
+    "name": "Demo Web Shop",
+    "url": "https://demowebshop.tricentis.com",
+    "sells": "clothing (jeans, shirts), shoes, computers, electronics, books, jewellery, gift cards"
+  },
+  {
+    "name": "Automation Exercise",
+    "url": "https://automationexercise.com",
+    "sells": "clothing for women, men and kids: tops, t-shirts, dresses, jeans, sarees"
+  },
+  {
+    "name": "Zara",
+    "url": "https://www.zara.com/uk/",
+    "sells": "clothing"
+  },
+  {
+    "name": "ASOS",
+    "url": "https://www.asos.com/",
+    "sells": "clothes"
+  },
+  {
+    "name": "Automation Test Store",
+    "url": "https://automationteststore.com/",
+    "sells": "apparel, shoes, t-shirts, makeup, skincare, fragrance, hair care, books"
+  },
+  {
+    "name": "Demoblaze",
+    "url": "https://www.demoblaze.com/",
+    "sells": "electronics: phones, laptops, monitors"
+  },
+  {
+    "name": "Books to Scrape",
+    "url": "https://books.toscrape.com/",
+    "sells": "books across fiction, nonfiction, science, travel, history, fantasy, and other genres"
+  },
+  {
+    "name": "Web Scraper Test Store",
+    "url": "https://webscraper.io/test-sites/e-commerce/static",
+    "sells": "demo electronics such as laptops and tablets"
+  },
+  {
+    "name": "ScrapeMe",
+    "url": "https://scrapeme.live/shop/",
+    "sells": "fictional Pokemon-themed products with catalogue search, pricing, and product details"
+  },
+  {
+    "name": "SauceDemo",
+    "url": "https://www.saucedemo.com/",
+    "sells": "demo apparel and accessories: t-shirts, jackets, backpacks, bike lights"
+  },
+  {
+    "name": "nopCommerce Demo Store",
+    "url": "https://demo.nopcommerce.com/",
+    "sells": "clothing (t-shirts, jeans), shoes, computers, electronics, books, jewellery, gift cards"
+  },
+  {
+    "name": "GreenKart",
+    "url": "https://rahulshettyacademy.com/seleniumPractise/",
+    "sells": "demo groceries: fresh vegetables and fruits"
+  },
+  {
+    "name": "Expand Testing Bookstore",
+    "url": "https://practice.expandtesting.com/bookstore",
+    "sells": "demo books about software development, agile testing, DevOps, and technology"
+  },
+  {
+    "name": "BrowserStack Demo Store",
+    "url": "https://www.bstackdemo.com/",
+    "sells": "demo smartphones and mobile devices"
+  },
+  {
+    "name": "ScandiPWA Tech Demo Store",
+    "url": "https://tech-demo.scandipwa.com/tech_storeview/",
+    "sells": "demo electronics: smartphones, laptops, tablets, headphones, cameras, computers, appliances, accessories"
+  }
 ]

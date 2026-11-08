@@ -58,24 +58,29 @@ The client resolves these paths against the API origin, using `ws://` for HTTP a
 
 | Backend event | Existing UI destination |
 |---|---|
-| Planning job result | `RunView` heading, variables and queued site cards. |
+| Planning job result | `RunView` heading (summary), input chips (`variables`), dashed option chips (`choices`) and queued site cards (`sites`). |
 | `recorder` | `Rail` REC bar's readable latest action and action count. |
 | Recording `status: stopping/processing` | Draft strip's “Reading … actions” state. |
 | Recording terminal result's `skill` | Existing draft name/Steps/Save/Discard controls. Closing the backend browser also triggers compilation. |
-| `agent` status/step | Site card opening/running state, active tick and footer description. |
-| `action` | Completed step tick after the action succeeds; partial/navigation/repeated actions stay active until complete. |
-| Run/plan `log` | Existing folded Logs panel, including clicks, cart activity, stdout/stderr, errors and final outcome. Partial text fragments are joined. |
-| Run/plan `llm.start` / `llm.delta` | A progressively updated row per call/attempt under Logs → debug. Generated text is usually JSON; it does not replace the task heading or results. The recording compiler's result instead populates the draft's Steps and variables. |
-| `llm.retry` / `llm.error` | Warning/error in Logs. |
+| `agent` status/step/log/error | Reworded into a per-site Activity line (`mapping.ts` → `describeAgent`; original kept as `raw`), the card footer, and step ticks: cached replays, `already_done`, passed verifies and captures complete a tick; `skipped verify N` / `skipped optional step N` (step only in the text) mark it skipped. `needs_human` with `reason`/`options` shows the question on the card. |
+| `action` | Completed step tick after the action succeeds (partial/navigation/repeated actions stay active), an Activity line such as “Clicked “Add to cart””, and the site's last page URL. |
+| Run/plan `log` | Console panel, including clicks, cart activity, stdout/stderr, errors and final outcome. Partial text fragments are joined. |
+| Run/plan `llm.start` / `llm.delta` | A progressively updated row per call/attempt under Console → debug. Generated text is usually JSON; it does not replace the task heading or results. The recording compiler's result instead populates the draft's Steps and variables. |
+| `llm.retry` / `llm.error` | Warning/error in Console. |
 | `llm.response` | No duplicate display: streamed text is already available, and structured UI uses the final job result. |
-| `completed` / `failed` / `needs_human` / `cancelled` | Terminal site status, existing error treatment, final screenshot and actual extracted outputs in the results table. |
+| `completed` / `failed` / `needs_human` / `cancelled` | Terminal site status label, final screenshot (click to open), and one results-table row per site: Site, Status, every key of `result.outputs`, the last page reported by `action` frames, and a reworded `result.error` / `error.message` (original in the card footer tooltip). |
 | `gap` | Recover console text via `log_url` and `X-Log-Sequence`; skip already-recovered log frames. Warn if earlier generated text has expired. |
 | Socket lifecycle | Run header reconnect indicator, recorder reconnect message, and existing error UI if recovery fails. Rail availability reflects skill discovery, with Retry on failure. |
 
 The backend does not report exact/synonym/fuzzy/heal matcher tiers or live video.
 Actual completed steps therefore use a neutral completion tick. While working,
-the card shows its current action and “Browser is running”; afterward it uses the
-final screenshot, when available. Synthetic pages, prices, tiers and approval
+the card shows its current activity while the agent works in a visible Chrome window
+on the backend machine (API runs follow the project's `HEADLESS` setting; `HEADLESS=1`
+hides it); afterward it uses the final screenshot, when available. The route map
+(`RouteMap.tsx`) shows one bar per skill step per site, a moving marker per site, and
+the step a site stopped on (taken from the backend's `step N` error text when present);
+selecting a lane or thumbnail pins that site in the spotlight (`SiteWindow.tsx`), and
+selecting it again returns to automatic focus. Synthetic pages, prices, tiers and approval
 buttons remain confined to explicit mock mode.
 
 ## Lifecycle and recovery
@@ -109,6 +114,13 @@ the late job is cancelled. Effects and the API subscriptions have cleanup paths.
   Extracted columns depend on the selected skill. The adapter executes run jobs;
   it does not add spreadsheet export or a payment/approval API.
 - `needs_human` is terminal; the current backend has no resume command.
+- The planner returns `choices` (e.g. a size from the message), but
+  `POST /api/skills/{id}/runs` accepts only the skill's own `arguments` and rejects
+  unknown names, and the API run passes no `answers` to the agent. Choices are shown
+  as dashed chips only; a site that needs one ends as `needs_human`.
+- API runs call `run_program` for one site, not the CLI orchestrator, so no extra
+  product name/price extraction or sheet write happens. The results table shows
+  `outputs` only when the skill has `extract` steps.
 - Only task output is streamed; independently started CLI/server process output
   is outside the job's console capture.
 

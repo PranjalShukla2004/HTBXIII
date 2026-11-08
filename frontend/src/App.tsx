@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { PanelLeft, SquarePen, X } from 'lucide-react'
 import { useStore } from './store'
+import { USE_MOCK } from './api'
 import { Logo, Rail } from './components/Rail'
 import { Composer, Thread } from './components/Chat'
 import { LearnPanel } from './components/LearnPanel'
@@ -17,6 +18,15 @@ export default function App() {
   useEffect(() => {
     void loadSkills()
   }, [loadSkills])
+
+  // The backend is often started after the dashboard: keep retrying skill discovery until it answers.
+  const skillsLoaded = useStore((s) => s.skillsLoaded)
+  const connected = useStore((s) => s.agentConnected)
+  useEffect(() => {
+    if (USE_MOCK || !skillsLoaded || connected) return
+    const t = setInterval(() => void loadSkills(), 5000)
+    return () => clearInterval(t)
+  }, [skillsLoaded, connected, loadSkills])
 
   useEffect(() => () => useStore.getState().dispose(), [])
 

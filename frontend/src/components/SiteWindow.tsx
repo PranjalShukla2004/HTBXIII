@@ -10,6 +10,12 @@ import { SimPage } from './SimPage'
 import { money, parseMoney } from '../lib/results'
 
 const REASON: Record<FocusReason, string> = { heal: 'Self-heal', needs: 'Needs you', price: 'Price found', live: 'Live' }
+const STATUS_LABEL: Record<TargetState['status'], string> = {
+  queued: 'Queued', running: 'Running', ok: 'Completed', failed: 'Failed', needs_human: 'Needs attention', stopped: 'Stopped',
+}
+const STATUS_TEXT: Record<TargetState['status'], string> = {
+  queued: 'text-fg-3', running: 'text-accent-2', ok: 'text-fg-2', failed: 'text-heal', needs_human: 'text-fuzzy', stopped: 'text-fg-3',
+}
 const HEAL_MS = 3400
 
 type Pt = { x: number; y: number }
@@ -77,6 +83,8 @@ export function SiteWindow({
   const raw = t.result ? t.result.unit ?? t.result.price ?? t.result.total : undefined
   const amount = parseMoney(raw)
   const price = amount === undefined ? String(raw ?? '') : money(amount, String(raw).match(/[£$€]/)?.[0] ?? '£')
+  const footer = t.takeover ? 'Your turn. Tick the box in the window.' : t.blocked ? t.blocked.message
+    : t.status === 'queued' ? hostOf(t.url) : done && USE_MOCK ? 'Finished' : (t.currentStep ?? 'Opening the site')
 
   return (
     <div
@@ -118,7 +126,13 @@ export function SiteWindow({
         {t.status === 'queued' ? (
           <div className="grid h-full place-items-center bg-side text-[12px] text-fg-3">Waiting</div>
         ) : t.frame ? (
-          <img src={t.frame} alt={`${t.frameFinal ? 'Final' : 'Live'} view of ${t.name}`} className="h-full w-full object-cover object-top" />
+          spot ? (
+            <a href={t.frame} target="_blank" rel="noopener noreferrer" title="Open the screenshot full size" className="block h-full">
+              <img src={t.frame} alt={`${t.frameFinal ? 'Final' : 'Live'} view of ${t.name}`} className="h-full w-full object-cover object-top" />
+            </a>
+          ) : (
+            <img src={t.frame} alt={`${t.frameFinal ? 'Final' : 'Live'} view of ${t.name}`} className="h-full w-full object-cover object-top" />
+          )
         ) : sim ? (
           <div className="absolute top-0 left-0" style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}>
             <div ref={page} className={cx(!t.takeover && 'pointer-events-none')}>
@@ -135,7 +149,11 @@ export function SiteWindow({
           </div>
         ) : (
           <div className="grid h-full place-items-center bg-side px-4 text-center text-[12px] text-fg-3">
-            {t.status === 'running' ? 'Browser is running' : t.status === 'needs_human' ? 'Needs your attention' : t.status === 'failed' ? 'Could not complete this site' : t.status === 'stopped' ? 'Stopped' : 'Run complete'}
+            {t.status === 'running' ? (
+              <span className="flex items-center gap-2">
+                <span className="size-1.5 animate-blink rounded-full bg-accent" /> Watch the agent in its Chrome window
+              </span>
+            ) : t.status === 'needs_human' ? 'Needs your attention' : t.status === 'failed' ? 'Could not complete this site' : t.status === 'stopped' ? 'Stopped' : 'Run complete · no screenshot'}
           </div>
         )}
 
@@ -147,12 +165,22 @@ export function SiteWindow({
         )}
       </div>
 
-      <div className={cx('flex items-center gap-2 px-3 text-[12px] text-fg-2', spot ? 'h-10' : 'h-7')}>
+      <div className={cx('flex items-center gap-2 px-3 text-[12px] text-fg-2', spot ? 'min-h-10 py-1.5' : 'h-7')}>
         {t.status === 'running' && <span className="size-1.5 shrink-0 animate-blink rounded-full bg-accent" />}
         {t.blocked && <Hand className="size-3.5 shrink-0 text-fuzzy" />}
-        <span className={cx('min-w-0 flex-1 truncate', t.blocked && 'text-fuzzy')}>
-          {t.takeover ? 'Your turn. Tick the box in the window.' : t.blocked ? t.blocked.message : t.status === 'queued' ? hostOf(t.url) : done ? 'Finished' : (t.currentStep ?? 'Opening')}
+        <span className={cx('min-w-0 flex-1', t.blocked && 'text-fuzzy')} title={t.detail ?? footer}>
+          <span className={cx('block', spot ? 'leading-snug' : 'truncate')}>{footer}</span>
+          {spot && t.blocked && t.attention?.options.length ? (
+            <span className="mt-0.5 block truncate font-mono text-[11px] text-fg-2" title={t.attention.options.join(' · ')}>{t.attention.options.join(' · ')}</span>
+          ) : null}
         </span>
+        {!(spot && t.blocked) && <span className={cx('shrink-0 font-medium', spot ? 'text-[11px]' : 'text-[10.5px]', STATUS_TEXT[t.status])}>{STATUS_LABEL[t.status]}</span>}
+        {spot && !t.blocked && !USE_MOCK && t.status !== 'queued' && (
+          <a href={t.lastUrl ?? t.url} target="_blank" rel="noopener noreferrer" title={t.lastUrl ?? t.url} onClick={(e) => e.stopPropagation()}
+            className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium text-fg-2 ring-1 ring-rule-2 hover:text-fg">
+            <ExternalLink className="size-3.5" /> Open site
+          </a>
+        )}
         {t.blocked && spot && (
           t.blocked.resumable ? (
             t.takeover ? (
@@ -165,7 +193,7 @@ export function SiteWindow({
               </button>
             )
           ) : (
-            <a href={t.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-fuzzy px-2.5 text-[12px] font-semibold text-black hover:brightness-110">
+            <a href={t.lastUrl ?? t.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-fuzzy px-2.5 text-[12px] font-semibold text-black hover:brightness-110">
               <ExternalLink className="size-3.5" /> Open site
             </a>
           )
